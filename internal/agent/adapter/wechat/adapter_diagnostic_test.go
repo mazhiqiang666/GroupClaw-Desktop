@@ -5,7 +5,6 @@ import (
 
 	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
 	"github.com/yourorg/auto-customer-service/internal/agent/windows"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
 )
 
 // controlledMockBridge 是一个用于最小闭环测试的 mock bridge，提供完全控制
@@ -19,12 +18,14 @@ type controlledMockBridge struct {
 	// Controlled nodes for testing
 	nodes []windows.AccessibleNode
 	// Track calls for verification
-	focusCalled    bool
-	sendCalled     bool
-	verifyCalled   bool
-	lastFocusHandle uintptr
-	lastSendContent string
-	lastSendTaskID  string
+	focusCalled      bool
+	sendCalled       bool
+	verifyCalled     bool
+	lastFocusHandle  uintptr
+	lastSendContent  string
+	lastSendTaskID   string
+	sendKeysCalls    []string  // 记录所有 SendKeys 调用
+	clipboardContent string    // 记录剪贴板内容
 }
 
 func newControlledMockBridge() *controlledMockBridge {
@@ -155,6 +156,7 @@ func (m *controlledMockBridge) CaptureWindow(handle uintptr) ([]byte, adapter.Re
 func (m *controlledMockBridge) SendKeys(handle uintptr, keys string) adapter.Result {
 	m.sendCalled = true
 	m.lastSendContent = keys
+	m.sendKeysCalls = append(m.sendKeysCalls, keys)
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -169,6 +171,7 @@ func (m *controlledMockBridge) Click(handle uintptr, x, y int) adapter.Result {
 }
 
 func (m *controlledMockBridge) SetClipboardText(text string) adapter.Result {
+	m.clipboardContent = text
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -229,8 +232,22 @@ func TestWeChatAdapter_MinimumClosedLoop_Diagnostics(t *testing.T) {
 	if !mock.sendCalled {
 		t.Error("Send should have called bridge.SendKeys")
 	}
-	if mock.lastSendContent != "Test message" {
-		t.Errorf("Send content mismatch: expected 'Test message', got '%s'", mock.lastSendContent)
+	// Check that the message was set to clipboard
+	if mock.clipboardContent != "Test message" {
+		t.Errorf("Clipboard content mismatch: expected 'Test message', got '%s'", mock.clipboardContent)
+	}
+	// Check that SendKeys was called with paste and enter commands
+	if len(mock.sendKeysCalls) < 2 {
+		t.Errorf("Expected at least 2 SendKeys calls (paste + enter), got %d", len(mock.sendKeysCalls))
+	} else {
+		// First call should be paste (^v)
+		if mock.sendKeysCalls[0] != "^v" {
+			t.Errorf("First SendKeys call should be '^v', got '%s'", mock.sendKeysCalls[0])
+		}
+		// Second call should be enter ({ENTER})
+		if mock.sendKeysCalls[1] != "{ENTER}" {
+			t.Errorf("Second SendKeys call should be '{{ENTER}}', got '%s'", mock.sendKeysCalls[1])
+		}
 	}
 
 	// Step 5: Verify message delivery

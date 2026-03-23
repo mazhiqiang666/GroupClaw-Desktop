@@ -260,7 +260,7 @@ make test-adapter
 验证完整链路和诊断信息一致性：
 
 ```bash
-go test -v ./internal/agent/adapter/wechat/adapter_diagnostic_test.go -timeout 30s
+go test -v ./internal/agent/adapter/wechat -run "TestWeChatAdapter_MinimumClosedLoop" -timeout 30s
 ```
 
 **测试内容：**
