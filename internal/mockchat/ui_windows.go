@@ -58,6 +58,7 @@ var (
 	procInvalidateRect      = user32.NewProc("InvalidateRect")
 	procBeginPaint          = user32.NewProc("BeginPaint")
 	procEndPaint            = user32.NewProc("EndPaint")
+	procFillRect            = user32.NewProc("FillRect")
 	procCreateSolidBrush    = gdi32.NewProc("CreateSolidBrush")
 	procDeleteObject        = gdi32.NewProc("DeleteObject")
 	procGetDC               = user32.NewProc("GetDC")
@@ -229,6 +230,7 @@ func (ui *MockChatUI) paintWindow(hwnd windows.Handle) {
 
 	// Draw background
 	brush, _, _ := procCreateSolidBrush.Call(0xF0F0F0) // Light gray
+	procFillRect.Call(uintptr(ps.Hdc), uintptr(unsafe.Pointer(&rect)), brush)
 	procEndPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
 	procDeleteObject.Call(brush)
 }
