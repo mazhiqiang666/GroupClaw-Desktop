@@ -587,11 +587,11 @@ func TestWeChatAdapter_Scan_WithPlaceholder(t *testing.T) {
 		t.Errorf("Expected 0 conversations when enumerate fails, got %d", len(conversations))
 	}
 
-	// 验证诊断信息中标记为 placeholder
+	// 验证诊断信息包含基本上下文
 	if len(result.Diagnostics) > 0 {
 		diag := result.Diagnostics[0]
-		if diag.Context["implementation"] != "placeholder" {
-			t.Errorf("Expected implementation to be 'placeholder', got '%s'", diag.Context["implementation"])
+		if diag.Context["window_handle"] == "" {
+			t.Error("Expected window_handle in diagnostics")
 		}
 	}
 }
