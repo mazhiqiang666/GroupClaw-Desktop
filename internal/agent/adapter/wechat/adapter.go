@@ -213,30 +213,6 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 	// 转换可访问节点为会话引用
 	conversations := []protocol.ConversationRef{}
 
-	if nodeResult.Status == adapter.StatusSuccess {
-		// 真实实现：从可访问节点提取会话
-		for i, node := range nodes {
-			// 过滤出会话项（基于角色或类名）
-			if node.Role == "list item" || node.Role == "ListItem" {
-				conversations = append(conversations, protocol.ConversationRef{
-					HostWindowHandle: windowHandle,
-					AppInstance:      instance,
-					DisplayName:      node.Name,
-					ListPosition:     i,
-				})
-			}
-		}
-	} else {
-		// Placeholder 实现：当无法枚举可访问节点时
-		// 返回最小占位结果，包含诊断信息
-		conversations = append(conversations, protocol.ConversationRef{
-			HostWindowHandle: windowHandle,
-			AppInstance:      instance,
-			DisplayName:      "Placeholder Conversation",
-			ListPosition:     0,
-		})
-	}
-
 	// 构建诊断信息
 	diagnostics := map[string]string{
 		"window_handle":    strconv.FormatUint(uint64(windowHandle), 10),
@@ -254,6 +230,35 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 	if nodeResult.Status != adapter.StatusSuccess {
 		diagnostics["implementation"] = "placeholder"
 		diagnostics["enumerate_error"] = string(nodeResult.ReasonCode)
+		// 如果无法枚举节点，返回空列表而不是占位会话
+		return []protocol.ConversationRef{}, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonCode("NO_CONVERSATIONS"),
+			Confidence: 0.0,
+			ElapsedMs:  0,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Scan completed - no conversations found",
+					Context:   diagnostics,
+				},
+			},
+		}
+	}
+
+	// 真实实现：从可访问节点提取会话
+	// 只保留真实 list item / ListItem 且 Name 非空的节点
+	for i, node := range nodes {
+		// 过滤出会话项（基于角色或类名）
+		if (node.Role == "list item" || node.Role == "ListItem") && node.Name != "" {
+			conversations = append(conversations, protocol.ConversationRef{
+				HostWindowHandle: windowHandle,
+				AppInstance:      instance,
+				DisplayName:      node.Name,
+				ListPosition:     i,
+			})
+		}
 	}
 
 	return conversations, adapter.Result{

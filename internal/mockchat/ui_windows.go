@@ -4,9 +4,9 @@ package mockchat
 
 import (
 	"fmt"
-	"log"
 	"sync"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -16,13 +16,24 @@ import (
 const (
 	WS_OVERLAPPEDWINDOW = 0x00CF0000
 	WS_VISIBLE          = 0x10000000
-	CW_USEDEFAULT       = 0x80000000
+	WS_CHILD            = 0x40000000
+	WS_BORDER           = 0x00800000
+	WS_VSCROLL          = 0x00200000
+	ES_MULTILINE        = 0x0004
+	ES_AUTOVSCROLL      = 0x0040
+	ES_WANTRETURN       = 0x1000
+	BS_PUSHBUTTON       = 0x00000000
+
+	CW_USEDEFAULT = 0x80000000
 
 	WM_CREATE  = 0x0001
 	WM_DESTROY = 0x0002
 	WM_PAINT   = 0x000F
 	WM_CLOSE   = 0x0010
 	WM_SIZE    = 0x0005
+	WM_COMMAND = 0x0111
+	WM_LBUTTONDOWN = 0x0201
+	WM_KEYDOWN = 0x0100
 
 	WM_USER = 0x0400
 
@@ -31,6 +42,10 @@ const (
 	WM_UPDATE_MESSAGES      = WM_USER + 2
 
 	IDC_ARROW = 32512
+
+	// Edit control ID
+	ID_EDIT_INPUT = 1001
+	ID_BTN_SEND   = 1002
 )
 
 var (
@@ -66,6 +81,10 @@ var (
 	procTextOutW            = gdi32.NewProc("TextOutW")
 	procSetBkMode           = gdi32.NewProc("SetBkMode")
 	procSetTextColor        = gdi32.NewProc("SetTextColor")
+	procCreateWindowExWEdit = user32.NewProc("CreateWindowExW") // Edit control
+	procCreateWindowExWBtn  = user32.NewProc("CreateWindowExW") // Button control
+	procSendMessageW        = user32.NewProc("SendMessageW")
+	procGetWindowTextLengthW = user32.NewProc("GetWindowTextLengthW")
 )
 
 // WNDCLASSEXW structure
@@ -106,15 +125,25 @@ type MockChatUI struct {
 	windowTitle string
 	mu          sync.RWMutex
 	running     bool
+
+	// GUI component handles
+	hwndEdit    windows.Handle // Input edit control
+	hwndBtn     windows.Handle // Send button
+
+	// Layout dimensions
+	convListWidth int
+	inputAreaHeight int
 }
 
 // NewMockChatUI creates a new UI instance
 func NewMockChatUI(app *MockChatApp) *MockChatUI {
 	return &MockChatUI{
-		app:         app,
-		className:   "MockChatWindowClass",
-		windowTitle: "Mock Chat App - 微信桌面版模拟器",
-		running:     false,
+		app:             app,
+		className:       "MockChatWindowClass",
+		windowTitle:     "Mock Chat App - 微信桌面版模拟器",
+		running:         false,
+		convListWidth:   200,
+		inputAreaHeight: 100,
 	}
 }
 
@@ -178,6 +207,52 @@ func (ui *MockChatUI) Initialize() error {
 	procShowWindow.Call(uintptr(ui.hwnd), 1) // SW_SHOW
 	procUpdateWindow.Call(uintptr(ui.hwnd))
 
+	// Create input edit control
+	editStyle := WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_AUTOVSCROLL | ES_WANTRETURN | WS_BORDER
+	editTitle, _ := windows.UTF16PtrFromString("")
+	editClass, _ := windows.UTF16PtrFromString("EDIT")
+	hwndEdit, _, err := procCreateWindowExW.Call(
+		0,                              // dwExStyle
+		uintptr(unsafe.Pointer(editClass)), // lpClassName
+		uintptr(unsafe.Pointer(editTitle)), // lpWindowName
+		uintptr(editStyle),            // dwStyle
+		uintptr(ui.convListWidth),     // x
+		uintptr(600-ui.inputAreaHeight), // y
+		uintptr(600-ui.convListWidth-100), // nWidth
+		uintptr(ui.inputAreaHeight),   // nHeight
+		uintptr(ui.hwnd),              // hWndParent
+		uintptr(ID_EDIT_INPUT),        // hMenu
+		uintptr(ui.hInstance),         // hInstance
+		0,                             // lpParam
+	)
+	if hwndEdit == 0 {
+		return fmt.Errorf("failed to create edit control: %v", err)
+	}
+	ui.hwndEdit = windows.Handle(hwndEdit)
+
+	// Create send button
+	btnStyle := WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON
+	btnTitle, _ := windows.UTF16PtrFromString("发送")
+	btnClass, _ := windows.UTF16PtrFromString("BUTTON")
+	hwndBtn, _, err := procCreateWindowExW.Call(
+		0,                              // dwExStyle
+		uintptr(unsafe.Pointer(btnClass)), // lpClassName
+		uintptr(unsafe.Pointer(btnTitle)), // lpWindowName
+		uintptr(btnStyle),            // dwStyle
+		uintptr(600-100),             // x
+		uintptr(600-ui.inputAreaHeight), // y
+		uintptr(100),                 // nWidth
+		uintptr(ui.inputAreaHeight),  // nHeight
+		uintptr(ui.hwnd),             // hWndParent
+		uintptr(ID_BTN_SEND),         // hMenu
+		uintptr(ui.hInstance),        // hInstance
+		0,                            // lpParam
+	)
+	if hwndBtn == 0 {
+		return fmt.Errorf("failed to create button: %v", err)
+	}
+	ui.hwndBtn = windows.Handle(hwndBtn)
+
 	return nil
 }
 
@@ -200,12 +275,85 @@ func (ui *MockChatUI) wndProc(hwnd windows.Handle, msg uint32, wParam uintptr, l
 		return 0
 
 	case WM_SIZE:
-		// Handle window resize
+		// Handle window resize - trigger repaint
+		procInvalidateRect.Call(uintptr(hwnd), 0, 1)
+		return 0
+
+	case WM_COMMAND:
+		// Handle button clicks
+		if wParam == ID_BTN_SEND {
+			ui.handleSendButtonClick()
+		}
+		return 0
+
+	case WM_LBUTTONDOWN:
+		// Handle conversation selection
+		x := int32(lParam & 0xFFFF)
+		y := int32((lParam >> 16) & 0xFFFF)
+		ui.handleConversationClick(x, y)
 		return 0
 
 	default:
 		ret, _, _ := procDefWindowProcW.Call(uintptr(hwnd), uintptr(msg), wParam, lParam)
 		return ret
+	}
+}
+
+// handleSendButtonClick handles the send button click event
+func (ui *MockChatUI) handleSendButtonClick() {
+	// Get text from edit control
+	textLen, _, _ := procGetWindowTextLengthW.Call(uintptr(ui.hwndEdit))
+	if textLen > 0 {
+		buf := make([]uint16, textLen+1)
+		procGetWindowTextW.Call(uintptr(ui.hwndEdit), uintptr(unsafe.Pointer(&buf[0])), textLen+1)
+		text := windows.UTF16ToString(buf)
+
+		// Add message to active conversation
+		ui.app.mu.Lock()
+		if activeConv, exists := ui.app.conversations[ui.app.activeConvID]; exists {
+			msg := MockMessage{
+				ID:         generateMessageID(),
+				ConvID:     ui.app.activeConvID,
+				SenderSide: "agent",
+				Content:    text,
+				Timestamp:  time.Now(),
+			}
+			activeConv.Messages = append(activeConv.Messages, msg)
+		}
+		ui.app.mu.Unlock()
+
+		// Clear edit control
+		procSendMessageW.Call(uintptr(ui.hwndEdit), 0x000C, 0, 0) // WM_SETTEXT
+
+		// Trigger repaint
+		procInvalidateRect.Call(uintptr(ui.hwnd), 0, 1)
+	}
+}
+
+// handleConversationClick handles clicking on a conversation in the list
+func (ui *MockChatUI) handleConversationClick(x int32, y int32) {
+	// Check if click is in conversation list area
+	if x < int32(ui.convListWidth) {
+		// Calculate which conversation was clicked
+		itemHeight := int32(40)
+		startY := int32(50) // Title + padding
+
+		ui.app.mu.Lock()
+		defer ui.app.mu.Unlock()
+
+		for _, conv := range ui.app.conversations {
+			if y >= startY && y < startY+itemHeight {
+				// Set this conversation as active
+				ui.app.activeConvID = conv.ID
+				for _, c := range ui.app.conversations {
+					c.IsActive = (c.ID == conv.ID)
+				}
+				// Trigger repaint
+				procInvalidateRect.Call(uintptr(ui.hwnd), 0, 1)
+				return
+			}
+			startY += itemHeight
+		}
 	}
 }
 
@@ -228,23 +376,170 @@ func (ui *MockChatUI) paintWindow(hwnd windows.Handle) {
 	}
 	procBeginPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
 
-	// Draw background
-	brush, _, _ := procCreateSolidBrush.Call(0xF0F0F0) // Light gray
-	procFillRect.Call(uintptr(ps.Hdc), uintptr(unsafe.Pointer(&rect)), brush)
-	procEndPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
+	// Draw conversation list background (left panel)
+	convListRect := struct {
+		Left   int32
+		Top    int32
+		Right  int32
+		Bottom int32
+	}{
+		Left:   0,
+		Top:    0,
+		Right:  int32(ui.convListWidth),
+		Bottom: rect.Bottom,
+	}
+	brush, _, _ := procCreateSolidBrush.Call(0xE8E8E8) // Light gray for list
+	procFillRect.Call(uintptr(ps.Hdc), uintptr(unsafe.Pointer(&convListRect)), brush)
 	procDeleteObject.Call(brush)
+
+	// Draw message area background (right panel)
+	msgAreaRect := struct {
+		Left   int32
+		Top    int32
+		Right  int32
+		Bottom int32
+	}{
+		Left:   int32(ui.convListWidth),
+		Top:    0,
+		Right:  rect.Right,
+		Bottom: rect.Bottom - int32(ui.inputAreaHeight),
+	}
+	brush2, _, _ := procCreateSolidBrush.Call(0xFFFFFF) // White for message area
+	procFillRect.Call(uintptr(ps.Hdc), uintptr(unsafe.Pointer(&msgAreaRect)), brush2)
+	procDeleteObject.Call(brush2)
+
+	// Draw input area background
+	inputAreaRect := struct {
+		Left   int32
+		Top    int32
+		Right  int32
+		Bottom int32
+	}{
+		Left:   int32(ui.convListWidth),
+		Top:    rect.Bottom - int32(ui.inputAreaHeight),
+		Right:  rect.Right - 100,
+		Bottom: rect.Bottom,
+	}
+	brush3, _, _ := procCreateSolidBrush.Call(0xF5F5F5) // Light gray for input
+	procFillRect.Call(uintptr(ps.Hdc), uintptr(unsafe.Pointer(&inputAreaRect)), brush3)
+	procDeleteObject.Call(brush3)
+
+	// Draw conversation list items
+	ui.drawConversationList(ps.Hdc)
+
+	// Draw messages for active conversation
+	ui.drawMessages(ps.Hdc)
+
+	// Draw separator line
+	procSetTextColor.Call(uintptr(ps.Hdc), 0xCCCCCC)
+	procBeginPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps))) // Already in paint
+
+	procEndPaint.Call(uintptr(hwnd), uintptr(unsafe.Pointer(&ps)))
+}
+
+// drawConversationList draws the conversation list on the left panel
+func (ui *MockChatUI) drawConversationList(hdc windows.Handle) {
+	ui.app.mu.RLock()
+	defer ui.app.mu.RUnlock()
+
+	y := int32(10)
+	itemHeight := int32(40)
+
+	// Draw title
+	titleColor := 0x000000
+	procSetTextColor.Call(uintptr(hdc), uintptr(titleColor))
+	procSetBkMode.Call(uintptr(hdc), 2) // TRANSPARENT
+
+	titlePtr, _ := windows.UTF16PtrFromString("会话列表")
+	procTextOutW.Call(uintptr(hdc), 10, uintptr(y), uintptr(unsafe.Pointer(titlePtr)), uintptr(len("会话列表")))
+	y += itemHeight + 5
+
+	// Draw each conversation
+	for _, conv := range ui.app.conversations {
+		// Highlight active conversation
+		if conv.IsActive {
+			brush, _, _ := procCreateSolidBrush.Call(0x0078D7) // Blue highlight
+			itemRect := struct {
+				Left   int32
+				Top    int32
+				Right  int32
+				Bottom int32
+			}{
+				Left:   0,
+				Top:    y - 5,
+				Right:  int32(ui.convListWidth),
+				Bottom: y + itemHeight,
+			}
+			procFillRect.Call(uintptr(hdc), uintptr(unsafe.Pointer(&itemRect)), brush)
+			procDeleteObject.Call(brush)
+			procSetTextColor.Call(uintptr(hdc), 0xFFFFFF) // White text
+		} else {
+			procSetTextColor.Call(uintptr(hdc), 0x000000) // Black text
+		}
+
+		// Draw conversation name
+		name := conv.DisplayName
+		if conv.UnreadCount > 0 {
+			name = fmt.Sprintf("%s (%d)", conv.DisplayName, conv.UnreadCount)
+		}
+		namePtr, _ := windows.UTF16PtrFromString(name)
+		procTextOutW.Call(uintptr(hdc), 10, uintptr(y), uintptr(unsafe.Pointer(namePtr)), uintptr(len(name)))
+
+		y += itemHeight
+	}
+}
+
+// drawMessages draws messages for the active conversation
+func (ui *MockChatUI) drawMessages(hdc windows.Handle) {
+	ui.app.mu.RLock()
+	defer ui.app.mu.RUnlock()
+
+	activeConv, exists := ui.app.conversations[ui.app.activeConvID]
+	if !exists {
+		return
+	}
+
+	procSetTextColor.Call(uintptr(hdc), 0x000000)
+	procSetBkMode.Call(uintptr(hdc), 2) // TRANSPARENT
+
+	y := int32(10)
+	itemHeight := int32(30)
+
+	// Draw active conversation name at top
+	titlePtr, _ := windows.UTF16PtrFromString(fmt.Sprintf("当前会话: %s", activeConv.DisplayName))
+	procTextOutW.Call(uintptr(hdc), uintptr(ui.convListWidth+10), uintptr(y), uintptr(unsafe.Pointer(titlePtr)), uintptr(len(fmt.Sprintf("当前会话: %s", activeConv.DisplayName))))
+	y += itemHeight + 10
+
+	// Draw messages
+	for _, msg := range activeConv.Messages {
+		prefix := "客户: "
+		if msg.SenderSide == "agent" {
+			prefix = "客服: "
+		}
+		text := prefix + msg.Content
+		if len(text) > 50 {
+			text = text[:47] + "..."
+		}
+
+		textPtr, _ := windows.UTF16PtrFromString(text)
+		procTextOutW.Call(uintptr(hdc), uintptr(ui.convListWidth+10), uintptr(y), uintptr(unsafe.Pointer(textPtr)), uintptr(len(text)))
+
+		y += itemHeight
+		if y > 450 {
+			break // Don't draw beyond message area
+		}
+	}
+
+	// Draw placeholder if no messages
+	if len(activeConv.Messages) == 0 {
+		placeholderPtr, _ := windows.UTF16PtrFromString("暂无消息")
+		procTextOutW.Call(uintptr(hdc), uintptr(ui.convListWidth+10), uintptr(y), uintptr(unsafe.Pointer(placeholderPtr)), uintptr(len("暂无消息")))
+	}
 }
 
 // Run starts the GUI event loop
 func (ui *MockChatUI) Run() {
 	ui.running = true
-
-	// Start HTTP server in background
-	go func() {
-		if err := ui.app.StartHTTPServer(":8081"); err != nil {
-			log.Printf("HTTP server failed: %v", err)
-		}
-	}()
 
 	// Message loop
 	var msg MSG
