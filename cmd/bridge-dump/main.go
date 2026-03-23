@@ -14,6 +14,8 @@ import (
 var (
 	jsonOutput = flag.Bool("json", false, "Output as JSON")
 	maxDepth   = flag.Int("depth", 5, "Maximum recursion depth for node traversal")
+	filterRole = flag.String("role", "", "Filter nodes by role (e.g., 'list item')")
+	filterName = flag.String("name", "", "Filter nodes by name (substring match)")
 )
 
 func main() {
@@ -65,6 +67,23 @@ func main() {
 			log.Fatalf("Invalid window handle: %v", err)
 		}
 		focusWindow(bridge, uintptr(handle))
+	case "click-verify":
+		if len(args) < 4 {
+			log.Fatal("Usage: bridge-dump click-verify <window-handle> <x> <y>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		x, err := strconv.Atoi(args[2])
+		if err != nil {
+			log.Fatalf("Invalid X coordinate: %v", err)
+		}
+		y, err := strconv.Atoi(args[3])
+		if err != nil {
+			log.Fatalf("Invalid Y coordinate: %v", err)
+		}
+		clickVerify(bridge, uintptr(handle), x, y)
 	default:
 		printUsage()
 	}
@@ -78,16 +97,22 @@ func printUsage() {
 	fmt.Println("  bridge-dump window-info <handle>     - Get window information")
 	fmt.Println("  bridge-dump list-nodes <handle>      - List accessibility nodes")
 	fmt.Println("  bridge-dump focus <handle>           - Focus window")
+	fmt.Println("  bridge-dump click-verify <h> <x> <y> - Click and verify (experimental)")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
 	fmt.Println("  --depth <n>                         - Maximum recursion depth (default: 5)")
+	fmt.Println("  --role <role>                       - Filter nodes by role")
+	fmt.Println("  --name <name>                       - Filter nodes by name (substring)")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  bridge-dump find-wechat")
 	fmt.Println("  bridge-dump window-info 123456")
 	fmt.Println("  bridge-dump list-nodes 123456 --json --depth 3")
+	fmt.Println("  bridge-dump list-nodes 123456 --role \"list item\"")
+	fmt.Println("  bridge-dump list-nodes 123456 --name \"张三\"")
 	fmt.Println("  bridge-dump focus 123456")
+	fmt.Println("  bridge-dump click-verify 123456 100 200")
 }
 
 func findWeChat(bridge windows.BridgeInterface) {
@@ -193,11 +218,14 @@ func listNodes(bridge windows.BridgeInterface, handle uintptr) {
 		printNodesJSON(nodes, 0)
 	} else {
 		fmt.Printf("Found %d accessibility node(s) (max depth: %d):\n", len(nodes), *maxDepth)
-		printNodesText(nodes, 0)
+		if *filterRole != "" || *filterName != "" {
+			fmt.Printf("Filtering by role='%s' name='%s'\n", *filterRole, *filterName)
+		}
+		printNodesText(nodes, 0, "")
 	}
 }
 
-func printNodesText(nodes []windows.AccessibleNode, depth int) {
+func printNodesText(nodes []windows.AccessibleNode, depth int, path string) {
 	if depth >= *maxDepth {
 		return
 	}
@@ -208,13 +236,50 @@ func printNodesText(nodes []windows.AccessibleNode, depth int) {
 	}
 
 	for i, node := range nodes {
-		fmt.Printf("%s[%d] Handle: %d, Name: %s, Role: %s, Class: %s\n",
-			indent, i+1, node.Handle, node.Name, node.Role, node.ClassName)
+		// Apply filters
+		if *filterRole != "" && node.Role != *filterRole {
+			continue
+		}
+		if *filterName != "" && !contains(node.Name, *filterName) {
+			continue
+		}
+
+		// Build node path
+		nodePath := path
+		if nodePath == "" {
+			nodePath = fmt.Sprintf("[%d]", i+1)
+		} else {
+			nodePath = fmt.Sprintf("%s.[%d]", nodePath, i+1)
+		}
+
+		// Print node with bounds if available
+		boundsStr := ""
+		if len(node.Bounds) == 4 {
+			boundsStr = fmt.Sprintf(" Bounds(x=%d,y=%d,w=%d,h=%d)",
+				node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3])
+		}
+
+		fmt.Printf("%s%s Handle: %d, Name: %s, Role: %s, Class: %s%s\n",
+			indent, nodePath, node.Handle, node.Name, node.Role, node.ClassName, boundsStr)
 
 		if len(node.Children) > 0 {
-			printNodesText(node.Children, depth+1)
+			printNodesText(node.Children, depth+1, nodePath)
 		}
 	}
+}
+
+func contains(s, substr string) bool {
+	return len(s) > 0 && len(substr) > 0 && len(s) >= len(substr) &&
+		(s == substr || (len(s) > len(substr) && (s[:len(substr)] == substr || s[len(s)-len(substr):] == substr || findSubstring(s, substr))))
+}
+
+func findSubstring(s, substr string) bool {
+	for i := 0; i <= len(s)-len(substr); i++ {
+		if s[i:i+len(substr)] == substr {
+			return true
+		}
+	}
+	return false
 }
 
 func printNodesJSON(nodes []windows.AccessibleNode, depth int) interface{} {
@@ -279,5 +344,43 @@ func focusWindow(bridge windows.BridgeInterface, handle uintptr) {
 		fmt.Println(string(jsonData))
 	} else {
 		fmt.Printf("Successfully focused window: %d\n", handle)
+	}
+}
+
+func clickVerify(bridge windows.BridgeInterface, handle uintptr, x, y int) {
+	// Focus the window first
+	focusResult := bridge.FocusWindow(handle)
+	if focusResult.Status != adapter.StatusSuccess {
+		log.Fatalf("Failed to focus window: %s", focusResult.Error)
+	}
+
+	// Click at the specified coordinates
+	clickResult := bridge.Click(handle, x, y)
+	if clickResult.Status != adapter.StatusSuccess {
+		log.Fatalf("Failed to click at (%d, %d): %s", x, y, clickResult.Error)
+	}
+
+	// Capture screenshot for verification
+	screenshot, captureResult := bridge.CaptureWindow(handle)
+	if captureResult.Status != adapter.StatusSuccess {
+		log.Printf("Warning: Failed to capture screenshot: %s", captureResult.Error)
+	}
+
+	if *jsonOutput {
+		data := map[string]interface{}{
+			"success":      true,
+			"handle":       handle,
+			"click_x":      x,
+			"click_y":      y,
+			"screenshot":   len(screenshot) > 0,
+			"screenshot_size": len(screenshot),
+		}
+		jsonData, _ := json.MarshalIndent(data, "", "  ")
+		fmt.Println(string(jsonData))
+	} else {
+		fmt.Printf("Click verification completed:\n")
+		fmt.Printf("  Window: %d\n", handle)
+		fmt.Printf("  Position: (%d, %d)\n", x, y)
+		fmt.Printf("  Screenshot captured: %v (size: %d bytes)\n", len(screenshot) > 0, len(screenshot))
 	}
 }

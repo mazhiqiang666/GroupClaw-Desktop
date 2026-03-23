@@ -112,11 +112,13 @@ func (m *mockBridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]windows.A
 			Handle: 1,
 			Name:   "张三",
 			Role:   "list item",
+			Bounds: [4]int{10, 50, 180, 40}, // x, y, width, height - within left 1/3 area
 		},
 		{
 			Handle: 2,
 			Name:   "李四",
 			Role:   "list item",
+			Bounds: [4]int{10, 90, 180, 40}, // x, y, width, height - within left 1/3 area
 		},
 	}
 	return nodes, adapter.Result{

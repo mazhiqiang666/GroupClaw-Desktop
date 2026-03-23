@@ -1,6 +1,7 @@
 package wechat
 
 import (
+	"fmt"
 	"strconv"
 	"time"
 
@@ -176,6 +177,52 @@ func (a *WeChatAdapter) Detect() ([]protocol.AppInstanceRef, adapter.Result) {
 	}
 }
 
+// flattenNodes 递归扁平化 AccessibleNode 树
+func flattenNodes(nodes []windows.AccessibleNode, depth int, maxDepth int) []windows.AccessibleNode {
+	if depth >= maxDepth {
+		return nodes
+	}
+
+	result := make([]windows.AccessibleNode, 0, len(nodes))
+	for _, node := range nodes {
+		result = append(result, node)
+		if len(node.Children) > 0 {
+			result = append(result, flattenNodes(node.Children, depth+1, maxDepth)...)
+		}
+	}
+	return result
+}
+
+// isCandidateConversation 判断节点是否为候选会话项
+func isCandidateConversation(node windows.AccessibleNode, windowWidth int) bool {
+	// 检查角色：list item 或 ListItem
+	if node.Role != "list item" && node.Role != "ListItem" {
+		return false
+	}
+
+	// 检查名称非空
+	if node.Name == "" {
+		return false
+	}
+
+	// 检查 bounds 合理（有有效的边界框）
+	if len(node.Bounds) != 4 {
+		return false
+	}
+	bounds := node.Bounds
+	if bounds[2] <= 0 || bounds[3] <= 0 { // 宽度或高度为 0
+		return false
+	}
+
+	// 检查是否位于左侧列表区域（假设列表在左侧 1/3 区域内）
+	listAreaThreshold := windowWidth / 3
+	if bounds[0] > listAreaThreshold {
+		return false
+	}
+
+	return true
+}
+
 // Scan 扫描会话列表
 func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.ConversationRef, adapter.Result) {
 	// 查找微信窗口句柄
@@ -219,6 +266,8 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 		"window_class":     "",
 		"window_title":     "",
 		"nodes_found":      strconv.Itoa(len(nodes)),
+		"candidates_found": "0",
+		"hits_found":       "0",
 		"implementation":   "partial",
 	}
 
@@ -247,18 +296,51 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 		}
 	}
 
-	// 真实实现：从可访问节点提取会话
-	// 只保留真实 list item / ListItem 且 Name 非空的节点
-	for i, node := range nodes {
-		// 过滤出会话项（基于角色或类名）
-		if (node.Role == "list item" || node.Role == "ListItem") && node.Name != "" {
+	// 递归扁平化整个节点树
+	flatNodes := flattenNodes(nodes, 0, 10)
+
+	// 获取窗口宽度用于 bounds 检查
+	// WindowInfo 没有 Bounds 字段，从第一个节点的 bounds 推断或使用默认值
+	windowWidth := 800 // 默认宽度
+	if len(flatNodes) > 0 && len(flatNodes[0].Bounds) == 4 {
+		// 使用第一个节点的右边界作为窗口宽度参考
+		node := flatNodes[0]
+		windowWidth = node.Bounds[0] + node.Bounds[2] // x + width
+		if windowWidth < 400 {
+			windowWidth = 800 // 如果推断的宽度太小，使用默认值
+		}
+	}
+
+	// 真实实现：从扁平化后的节点中提取会话
+	candidateCount := 0
+	hitNodes := []string{}
+
+	for i, node := range flatNodes {
+		// 判断是否为候选会话项
+		if isCandidateConversation(node, windowWidth) {
+			candidateCount++
+
+			// 添加到会话列表
 			conversations = append(conversations, protocol.ConversationRef{
 				HostWindowHandle: windowHandle,
 				AppInstance:      instance,
 				DisplayName:      node.Name,
 				ListPosition:     i,
+				// 保存节点的 bounds 信息用于 Focus 时精确定位
+				// 注意：ConversationRef 没有 bounds 字段，需要在 Focus 中重新获取
 			})
+
+			// 记录命中节点摘要（前 5 个）
+			if len(hitNodes) < 5 {
+				hitNodes = append(hitNodes, node.Name)
+			}
 		}
+	}
+
+	diagnostics["candidates_found"] = strconv.Itoa(candidateCount)
+	diagnostics["hits_found"] = strconv.Itoa(len(conversations))
+	if len(hitNodes) > 0 {
+		diagnostics["hit_names"] = fmt.Sprintf("%v", hitNodes)
 	}
 
 	return conversations, adapter.Result{
@@ -279,13 +361,102 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 
 // Focus 聚焦到指定会话
 func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
+	startTime := time.Now()
+
 	// 1. 聚焦到微信窗口
-	result := a.bridge.FocusWindow(conv.HostWindowHandle)
-	if result.Status != adapter.StatusSuccess {
-		return result
+	focusWindowResult := a.bridge.FocusWindow(conv.HostWindowHandle)
+	if focusWindowResult.Status != adapter.StatusSuccess {
+		return focusWindowResult
 	}
 
-	// 2. 获取窗口信息以确定布局
+	// 2. 重新枚举节点以找到目标会话的 bounds
+	nodes, nodeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
+	if nodeResult.Status != adapter.StatusSuccess {
+		// 无法枚举节点，使用 ListPosition 回退方案
+		return a.focusByListPosition(conv, startTime, "fallback_enumerate_failed")
+	}
+
+	// 递归扁平化节点树
+	flatNodes := flattenNodes(nodes, 0, 10)
+
+	// 3. 查找匹配的节点（按名称）
+	var targetNode *windows.AccessibleNode
+	for _, node := range flatNodes {
+		if node.Name == conv.DisplayName &&
+		   (node.Role == "list item" || node.Role == "ListItem") {
+			targetNode = &node
+			break
+		}
+	}
+
+	// 4. 根据节点 bounds 或 ListPosition 计算点击位置
+	var clickX, clickY int
+	var locateSource string
+
+	if targetNode != nil && len(targetNode.Bounds) == 4 {
+		// 优先使用节点 bounds 的中心点
+		bounds := targetNode.Bounds
+		clickX = bounds[0] + bounds[2]/2 // x + width/2
+		clickY = bounds[1] + bounds[3]/2 // y + height/2
+		locateSource = "bounds"
+	} else {
+		// 回退到 ListPosition 推算
+		return a.focusByListPosition(conv, startTime, "fallback_no_bounds")
+	}
+
+	// 5. 点击目标会话
+	clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+	if clickResult.Status != adapter.StatusSuccess {
+		// 点击失败，但窗口已聚焦，返回部分成功
+		return adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Confidence: 0.7,
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "warn",
+					Message:   "Focus click failed but window focused",
+					Context: map[string]string{
+						"locate_source": locateSource,
+						"click_x": strconv.Itoa(clickX),
+						"click_y": strconv.Itoa(clickY),
+					},
+				},
+			},
+		}
+	}
+
+	// 6. 等待 UI 更新
+	time.Sleep(100 * time.Millisecond)
+
+	elapsedMs := time.Since(startTime).Milliseconds()
+
+	return adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+		Confidence: 1.0,
+		ElapsedMs:  elapsedMs,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Focus completed successfully",
+				Context: map[string]string{
+					"locate_source": locateSource,
+					"click_x": strconv.Itoa(clickX),
+					"click_y": strconv.Itoa(clickY),
+					"elapsed_ms": strconv.FormatInt(elapsedMs, 10),
+				},
+			},
+		},
+	}
+}
+
+// focusByListPosition 使用 ListPosition 回退方案计算点击位置
+func (a *WeChatAdapter) focusByListPosition(conv protocol.ConversationRef, startTime time.Time, reason string) adapter.Result {
+	// 获取窗口信息以确定布局
 	_, infoResult := a.bridge.GetWindowInfo(conv.HostWindowHandle)
 	if infoResult.Status != adapter.StatusSuccess {
 		// 如果无法获取窗口信息，仍然返回成功（至少聚焦了窗口）
@@ -293,11 +464,21 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 			Confidence: 0.8,
-			ElapsedMs:  0,
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "warn",
+					Message:   "Focus using fallback - cannot get window info",
+					Context: map[string]string{
+						"reason": reason,
+					},
+				},
+			},
 		}
 	}
 
-	// 3. 根据会话位置计算点击坐标
+	// 根据会话位置计算点击坐标
 	// 假设对话列表在左侧，宽度约 200px，每个会话项高度约 40px
 	// 起始 Y 坐标约 50px（标题栏 + 间距）
 	convListWidth := 200
@@ -308,7 +489,7 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 	clickX := convListWidth / 2 // 列表中间
 	clickY := startY + (conv.ListPosition * itemHeight) + (itemHeight / 2)
 
-	// 4. 点击目标会话
+	// 点击目标会话
 	clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
 	if clickResult.Status != adapter.StatusSuccess {
 		// 点击失败，但窗口已聚焦，返回部分成功
@@ -316,18 +497,46 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 			Confidence: 0.7,
-			ElapsedMs:  0,
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "warn",
+					Message:   "Focus click failed using fallback",
+					Context: map[string]string{
+						"reason": reason,
+						"click_x": strconv.Itoa(clickX),
+						"click_y": strconv.Itoa(clickY),
+					},
+				},
+			},
 		}
 	}
 
-	// 5. 等待 UI 更新
-	// time.Sleep(100 * time.Millisecond)
+	// 等待 UI 更新
+	time.Sleep(100 * time.Millisecond)
+
+	elapsedMs := time.Since(startTime).Milliseconds()
 
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
-		Confidence: 1.0,
-		ElapsedMs:  0,
+		Confidence: 0.9, // 略低置信度，因为使用的是回退方案
+		ElapsedMs:  elapsedMs,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Focus completed using fallback",
+				Context: map[string]string{
+					"locate_source": "list_position",
+					"reason": reason,
+					"click_x": strconv.Itoa(clickX),
+					"click_y": strconv.Itoa(clickY),
+					"elapsed_ms": strconv.FormatInt(elapsedMs, 10),
+				},
+			},
+		},
 	}
 }
 

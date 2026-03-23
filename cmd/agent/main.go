@@ -152,22 +152,16 @@ func handleReplyExecute(
 	convID := payload.ConversationID
 	var targetConv *protocol.ConversationRef
 	for i := range conversations {
-		if conversations[i].DisplayName == convID || conversations[i].HostWindowHandle != 0 {
+		if conversations[i].DisplayName == convID {
 			targetConv = &conversations[i]
 			break
 		}
 	}
 
 	if targetConv == nil {
-		// 如果找不到精确匹配，使用第一个会话
-		if len(conversations) > 0 {
-			targetConv = &conversations[0]
-			log.Printf("未找到精确匹配的会话 '%s'，使用第一个会话: %s", convID, targetConv.DisplayName)
-		} else {
-			log.Printf("未找到会话: %s", convID)
-			sendTaskFailed(client, env.TaskID, "CONV_NOT_FOUND", "未找到会话")
-			return
-		}
+		log.Printf("未找到会话: %s", convID)
+		sendTaskFailed(client, env.TaskID, "CONV_NOT_FOUND", "未找到会话")
+		return
 	}
 	log.Printf("目标会话: %s", targetConv.DisplayName)
 
@@ -195,11 +189,18 @@ func handleReplyExecute(
 	sendProgress(client, env.TaskID, 0.95, "验证消息发送中...", "verifying")
 	time.Sleep(500 * time.Millisecond) // 等待消息发送
 	msgObs, verifyResult := chatAdapter.Verify(*targetConv, payload.ReplyContent, 3*time.Second)
-	if verifyResult.Status != adapter.StatusSuccess {
-		log.Printf("验证消息失败: %s", verifyResult.Error)
-		// 即使验证失败，也标记任务完成（发送成功）
-	} else {
+
+	// 根据验证结果确定交付状态
+	var deliveryState string
+	if verifyResult.Status == adapter.StatusSuccess && verifyResult.Confidence >= 0.8 {
+		deliveryState = "verified"
 		log.Printf("消息验证成功 (置信度: %.2f)", verifyResult.Confidence)
+	} else if verifyResult.Status == adapter.StatusSuccess {
+		deliveryState = "sent_unverified"
+		log.Printf("消息发送成功但验证置信度较低 (置信度: %.2f)", verifyResult.Confidence)
+	} else {
+		deliveryState = "unknown"
+		log.Printf("验证消息失败: %s", verifyResult.Error)
 	}
 
 	// 标记任务已处理
@@ -216,7 +217,7 @@ func handleReplyExecute(
 		TaskID:                 env.TaskID,
 		ObservedMessageFingerprint: "",
 		VerificationConfidence: verifyResult.Confidence,
-		DeliveryState:          "delivered",
+		DeliveryState:          deliveryState,
 	}
 	if msgObs != nil {
 		taskCompleted.ObservedMessageFingerprint = msgObs.MessageFingerprint
