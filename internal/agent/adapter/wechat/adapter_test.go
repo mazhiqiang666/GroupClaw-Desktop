@@ -198,8 +198,21 @@ func TestWeChatAdapter_Init(t *testing.T) {
 	config := adapter.Config{}
 	result := wechatAdapter.Init(config)
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Init should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 0 {
+		t.Errorf("Expected Confidence 0 for Init, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) > 0 {
+		t.Errorf("Expected no diagnostics for Init, got %d", len(result.Diagnostics))
 	}
 
 	if !mock.initialized {
@@ -214,8 +227,21 @@ func TestWeChatAdapter_Detect(t *testing.T) {
 
 	instances, result := wechatAdapter.Detect()
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Detect should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) > 0 {
+		t.Errorf("Expected no diagnostics for Detect, got %d", len(result.Diagnostics))
 	}
 
 	if len(instances) != 1 {
@@ -296,8 +322,21 @@ func TestWeChatAdapter_Scan(t *testing.T) {
 
 	conversations, result := wechatAdapter.Scan(instance)
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Scan should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Errorf("Expected 1 diagnostic entry, got %d", len(result.Diagnostics))
 	}
 
 	if len(conversations) != 2 {
@@ -310,6 +349,13 @@ func TestWeChatAdapter_Scan(t *testing.T) {
 		}
 		if conversations[0].HostWindowHandle != 12345 {
 			t.Errorf("Expected HostWindowHandle 12345, got %d", conversations[0].HostWindowHandle)
+		}
+		// Verify diagnostics contain expected context
+		if len(result.Diagnostics) > 0 {
+			diag := result.Diagnostics[0]
+			if diag.Context["window_handle"] != "12345" {
+				t.Errorf("Expected window_handle '12345', got '%s'", diag.Context["window_handle"])
+			}
 		}
 	}
 }
@@ -370,8 +416,28 @@ func TestWeChatAdapter_Focus(t *testing.T) {
 
 	result := wechatAdapter.Focus(conv)
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Focus should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence <= 0 || result.Confidence > 1.0 {
+		t.Errorf("Expected Confidence between 0 and 1, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Errorf("Expected 1 diagnostic entry, got %d", len(result.Diagnostics))
+	}
+	// Verify diagnostics contain locate_source
+	if len(result.Diagnostics) > 0 {
+		diag := result.Diagnostics[0]
+		if _, ok := diag.Context["locate_source"]; !ok {
+			t.Error("Expected locate_source in diagnostics")
+		}
 	}
 }
 
@@ -385,12 +451,25 @@ func TestWeChatAdapter_Read(t *testing.T) {
 
 	messages, result := wechatAdapter.Read(conv, 10)
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Read should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
 	}
 
 	if messages == nil {
 		t.Error("Read should return a non-nil message slice")
+	}
+	if len(messages) != 0 {
+		t.Errorf("Expected 0 messages (stub implementation), got %d", len(messages))
 	}
 }
 
@@ -404,8 +483,28 @@ func TestWeChatAdapter_Send(t *testing.T) {
 
 	result := wechatAdapter.Send(conv, "Hello", "task-123")
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Send should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence <= 0 || result.Confidence > 1.0 {
+		t.Errorf("Expected Confidence between 0 and 1, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Errorf("Expected 1 diagnostic entry, got %d", len(result.Diagnostics))
+	}
+	// Verify diagnostics contain delivery state
+	if len(result.Diagnostics) > 0 {
+		diag := result.Diagnostics[0]
+		if _, ok := diag.Context["delivery_state"]; !ok {
+			t.Error("Expected delivery_state in diagnostics")
+		}
 	}
 }
 
@@ -419,8 +518,21 @@ func TestWeChatAdapter_Verify(t *testing.T) {
 
 	msg, result := wechatAdapter.Verify(conv, "Hello", 5)
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Verify should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence <= 0 || result.Confidence > 1.0 {
+		t.Errorf("Expected Confidence between 0 and 1, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Errorf("Expected 1 diagnostic entry, got %d", len(result.Diagnostics))
 	}
 
 	// Verify returns nil message for stub implementation
@@ -470,8 +582,15 @@ func TestWeChatAdapter_CaptureDiagnostics(t *testing.T) {
 
 	diagnostics, result := wechatAdapter.CaptureDiagnostics()
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("CaptureDiagnostics should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
 	}
 
 	if diagnostics["adapter_name"] != "wechat" {
@@ -489,12 +608,18 @@ func TestWeChatAdapter_IsAvailable(t *testing.T) {
 
 	result := wechatAdapter.IsAvailable()
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("IsAvailable should succeed, got status: %v", result.Status)
 	}
-
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
 	if result.Confidence != 1.0 {
 		t.Errorf("Expected confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
 	}
 }
 

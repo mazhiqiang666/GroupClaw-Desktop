@@ -238,11 +238,9 @@ func TestPositioningStrategyRules_CalculateClickPosition(t *testing.T) {
 		Bounds: [4]int{100, 200, 0, 0}, // Zero width and height
 	}
 	_, _, ok = rules.CalculateClickPosition(nodeInvalid)
-	// Note: The current implementation doesn't check for zero width/height,
-	// so this will return valid coordinates. This test documents current behavior.
-	// If zero dimensions should be invalid, the implementation needs to be updated.
-	if !ok {
-		t.Error("Expected valid for node with zero dimensions (current behavior)")
+	// Zero dimensions are invalid for clicking
+	if ok {
+		t.Error("Expected invalid for node with zero dimensions")
 	}
 }
 

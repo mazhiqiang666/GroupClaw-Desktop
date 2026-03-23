@@ -59,16 +59,53 @@ func (ps *PathSystem) ParsePath(path string) ([]int, error) {
 		return nil, fmt.Errorf("empty path")
 	}
 
+	// Validate path format - must contain brackets
+	if !strings.Contains(path, "[") || !strings.Contains(path, "]") {
+		return nil, fmt.Errorf("invalid path format: %s", path)
+	}
+
+	// Check for invalid patterns
+	if strings.Contains(path, "..") {
+		return nil, fmt.Errorf("invalid path format: %s", path)
+	}
+	if strings.HasSuffix(path, ".") {
+		return nil, fmt.Errorf("invalid path format: %s", path)
+	}
+	if strings.HasPrefix(path, ".") {
+		return nil, fmt.Errorf("invalid path format: %s", path)
+	}
+
 	// Remove outer brackets if present
 	path = strings.Trim(path, "[]")
 	parts := strings.Split(path, "].[")
+
+	// Check for empty parts
+	if len(parts) == 0 || (len(parts) == 1 && parts[0] == "") {
+		return nil, fmt.Errorf("invalid path format: %s", path)
+	}
 
 	indices := make([]int, len(parts))
 	for i, part := range parts {
 		// Clean up any remaining brackets
 		part = strings.Trim(part, "[]")
+		if part == "" {
+			return nil, fmt.Errorf("invalid path format: %s", path)
+		}
+
+		// Check for non-numeric characters
+		for _, ch := range part {
+			if (ch < '0' || ch > '9') && ch != '-' {
+				return nil, fmt.Errorf("invalid path format: %s", path)
+			}
+		}
+
 		idx, err := fmt.Sscanf(part, "%d", &indices[i])
 		if err != nil || idx != 1 {
+			return nil, fmt.Errorf("invalid path format: %s", path)
+		}
+
+		// Check for negative indices
+		if indices[i] < 0 {
 			return nil, fmt.Errorf("invalid path format: %s", path)
 		}
 	}
@@ -237,23 +274,36 @@ func (ec *EvidenceCollector) CollectMessageEvidence(
 	newNodes := ec.findNewMessageNodes(beforeNodes, afterNodes)
 	evidence.NewMessageNodes = len(newNodes)
 
-	// Extract text from new nodes
+	// Extract text from new nodes and check if they have valid bounds
+	hasInvalidNodeBounds := false
 	for _, node := range newNodes {
 		if node.Name != "" {
 			evidence.NewMessageText = append(evidence.NewMessageText, node.Name)
 		}
+		// Check if node has invalid bounds
+		if len(node.Bounds) != 4 || node.Bounds[2] <= 0 || node.Bounds[3] <= 0 {
+			hasInvalidNodeBounds = true
+		}
 	}
 
-	// Check screenshot change in chat area
+	// Check screenshot change in chat area (bounds validation happens inside checkScreenshotChange if needed)
 	if len(beforeScreenshot) > 0 && len(afterScreenshot) > 0 {
 		evidence.ScreenshotChanged = ec.checkScreenshotChange(beforeScreenshot, afterScreenshot, chatAreaBounds)
 	}
 
-	// Calculate chat area diff
-	evidence.ChatAreaDiff = ec.CalculateChatAreaDiff(beforeScreenshot, afterScreenshot, chatAreaBounds)
+	// Calculate chat area diff (only if bounds are valid)
+	hasValidBounds := chatAreaBounds[2] > 0 && chatAreaBounds[3] > 0
+	if hasValidBounds {
+		evidence.ChatAreaDiff = ec.CalculateChatAreaDiff(beforeScreenshot, afterScreenshot, chatAreaBounds)
+	}
 
 	// Calculate confidence
 	evidence.Confidence = ec.scoreMessageEvidence(evidence)
+
+	// Reduce confidence if nodes have invalid bounds
+	if hasInvalidNodeBounds {
+		evidence.Confidence *= 0.5
+	}
 
 	return evidence
 }
@@ -310,6 +360,11 @@ func (ec *EvidenceCollector) CalculateChatAreaDiff(
 	chatAreaBounds [4]int,
 ) float64 {
 	if len(before) == 0 || len(after) == 0 {
+		return 0
+	}
+
+	// Validate bounds - must have positive dimensions
+	if chatAreaBounds[2] <= 0 || chatAreaBounds[3] <= 0 {
 		return 0
 	}
 
@@ -413,6 +468,11 @@ const (
 func (mc *MessageClassifier) ClassifyNode(node windows.AccessibleNode) NodeType {
 	role := strings.ToLower(node.Role)
 	bounds := node.Bounds
+
+	// Validate bounds - must have 4 elements and positive dimensions
+	if len(bounds) != 4 || bounds[2] <= 0 || bounds[3] <= 0 {
+		return NodeTypeUnknown
+	}
 
 	// Check for input box (edit control)
 	if strings.Contains(role, "edit") || strings.Contains(role, "textbox") {

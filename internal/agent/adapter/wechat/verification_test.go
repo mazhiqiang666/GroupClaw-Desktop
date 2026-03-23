@@ -435,3 +435,437 @@ func TestPathSystem_StableKeyRefind(t *testing.T) {
 		t.Error("Failed to find node by TreePath")
 	}
 }
+
+// ==================== Dirty Data Tests for PathSystem ====================
+
+func TestPathSystem_GeneratePath_DirtyData(t *testing.T) {
+	ps := NewPathSystem()
+
+	tests := []struct {
+		name        string
+		node        windows.AccessibleNode
+		parentPath  string
+		index       int
+		expectError bool
+	}{
+		{
+			name:        "Empty node name",
+			node:        windows.AccessibleNode{Name: ""},
+			parentPath:  "[0]",
+			index:       1,
+			expectError: false,
+		},
+		{
+			name:        "Unicode node name",
+			node:        windows.AccessibleNode{Name: "测试用户@#$%"},
+			parentPath:  "[0]",
+			index:       1,
+			expectError: false,
+		},
+		{
+			name:        "Very long node name",
+			node:        windows.AccessibleNode{Name: "这是一个非常长的联系人名称用于测试边界情况"},
+			parentPath:  "[0]",
+			index:       1,
+			expectError: false,
+		},
+		{
+			name:        "Special characters in name",
+			node:        windows.AccessibleNode{Name: "Test<>\"'&"},
+			parentPath:  "[0]",
+			index:       1,
+			expectError: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := ps.GeneratePath(tt.node, tt.parentPath, tt.index)
+			if tt.expectError && path == "" {
+				t.Error("Expected non-empty path")
+			}
+			if !tt.expectError && path == "" {
+				t.Error("Expected non-empty path")
+			}
+		})
+	}
+}
+
+func TestPathSystem_ParsePath_DirtyData(t *testing.T) {
+	ps := NewPathSystem()
+
+	tests := []struct {
+		name        string
+		path        string
+		expectError bool
+	}{
+		{"Empty path", "", true},
+		{"Invalid format", "abc", true},
+		{"Missing brackets", "0", true},
+		{"Negative index", "[-1]", true},
+		{"Float index", "[1.5]", true},
+		{"Multiple dots", "[0]..[1]", true},
+		{"Trailing dot", "[0].", true},
+		{"Leading dot", ".[0]", true},
+		{"Empty index", "[]", true},
+		{"Non-numeric index", "[abc]", true},
+		{"Valid path", "[0].[1].[2]", false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ps.ParsePath(tt.path)
+			if tt.expectError && err == nil {
+				t.Errorf("Expected error for path '%s'", tt.path)
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+			}
+		})
+	}
+}
+
+func TestPathSystem_FindNodeByPath_DirtyData(t *testing.T) {
+	ps := NewPathSystem()
+
+	tests := []struct {
+		name        string
+		nodes       []windows.AccessibleNode
+		path        string
+		expectError bool
+	}{
+		{
+			name:        "Empty nodes",
+			nodes:       []windows.AccessibleNode{},
+			path:        "[0]",
+			expectError: true,
+		},
+		{
+			name: "Path out of range",
+			nodes: []windows.AccessibleNode{
+				{Name: "Node1", TreePath: "[0]"},
+			},
+			path:        "[5]",
+			expectError: true,
+		},
+		{
+			name: "Invalid nested path",
+			nodes: []windows.AccessibleNode{
+				{Name: "Node1", TreePath: "[0]"},
+			},
+			path:        "[0].[1]",
+			expectError: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ps.FindNodeByPath(tt.nodes, tt.path)
+			if tt.expectError && err == nil {
+				t.Errorf("Expected error for path '%s'", tt.path)
+			}
+			if !tt.expectError && err != nil {
+				t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+			}
+		})
+	}
+}
+
+func TestPathSystem_FlattenNodesWithPath_DirtyData(t *testing.T) {
+	ps := NewPathSystem()
+
+	tests := []struct {
+		name         string
+		nodes        []windows.AccessibleNode
+		maxDepth     int
+		expectedLen  int
+	}{
+		{
+			name:        "Empty nodes",
+			nodes:       []windows.AccessibleNode{},
+			maxDepth:    10,
+			expectedLen: 0,
+		},
+		{
+			name: "Deep nesting exceeding max depth",
+			nodes: []windows.AccessibleNode{
+				{
+					Name: "Root",
+					Children: []windows.AccessibleNode{
+						{
+							Name: "Child1",
+							Children: []windows.AccessibleNode{
+								{
+									Name: "Grandchild1",
+									Children: []windows.AccessibleNode{
+										{Name: "GreatGrandchild"},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			maxDepth:    2,
+			expectedLen: 3, // Root, Child1, Grandchild1 (excludes GreatGrandchild)
+		},
+		{
+			name: "Circular reference protection",
+			nodes: []windows.AccessibleNode{
+				{Name: "Node1"},
+				{Name: "Node2"},
+			},
+			maxDepth:    10,
+			expectedLen: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			flatNodes := ps.FlattenNodesWithPath(tt.nodes, "", 0, tt.maxDepth)
+			if len(flatNodes) != tt.expectedLen {
+				t.Errorf("Expected %d flat nodes, got %d", tt.expectedLen, len(flatNodes))
+			}
+		})
+	}
+}
+
+// ==================== Dirty Data Tests for EvidenceCollector ====================
+
+func TestEvidenceCollector_CollectActivationEvidence_DirtyData(t *testing.T) {
+	ec := NewEvidenceCollector()
+
+	tests := []struct {
+		name        string
+		conv        protocol.ConversationRef
+		nodes       []windows.AccessibleNode
+		origNodes   []windows.AccessibleNode
+		source      string
+		expectLowConfidence bool
+	}{
+		{
+			name: "Empty conversation name",
+			conv: protocol.ConversationRef{DisplayName: ""},
+			nodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{10, 50, 180, 40}},
+			},
+			origNodes:   []windows.AccessibleNode{},
+			source:      "test",
+			expectLowConfidence: true,
+		},
+		{
+			name: "No matching nodes",
+			conv: protocol.ConversationRef{DisplayName: "不存在的人"},
+			nodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{10, 50, 180, 40}},
+			},
+			origNodes:   []windows.AccessibleNode{},
+			source:      "test",
+			expectLowConfidence: true,
+		},
+		{
+			name: "Invalid node bounds",
+			conv: protocol.ConversationRef{DisplayName: "张三"},
+			nodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{}},
+			},
+			origNodes:   []windows.AccessibleNode{},
+			source:      "test",
+			expectLowConfidence: true,
+		},
+		{
+			name: "Empty nodes list",
+			conv: protocol.ConversationRef{DisplayName: "张三"},
+			nodes:       []windows.AccessibleNode{},
+			origNodes:   []windows.AccessibleNode{},
+			source:      "test",
+			expectLowConfidence: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evidence := ec.CollectActivationEvidence(tt.conv, tt.nodes, tt.origNodes, tt.source)
+			if tt.expectLowConfidence && evidence.Confidence >= 0.8 {
+				t.Errorf("Expected low confidence for dirty data, got %f", evidence.Confidence)
+			}
+		})
+	}
+}
+
+func TestEvidenceCollector_CollectMessageEvidence_DirtyData(t *testing.T) {
+	ec := NewEvidenceCollector()
+
+	tests := []struct {
+		name        string
+		beforeNodes []windows.AccessibleNode
+		afterNodes  []windows.AccessibleNode
+		beforeSS    []byte
+		afterSS     []byte
+		expectLowConfidence bool
+	}{
+		{
+			name: "Empty before and after nodes",
+			beforeNodes: []windows.AccessibleNode{},
+			afterNodes:  []windows.AccessibleNode{},
+			beforeSS:    []byte{1, 2, 3},
+			afterSS:     []byte{1, 2, 4},
+			expectLowConfidence: true,
+		},
+		{
+			name: "Invalid screenshot data",
+			beforeNodes: []windows.AccessibleNode{},
+			afterNodes:  []windows.AccessibleNode{},
+			beforeSS:    []byte{},
+			afterSS:     []byte{},
+			expectLowConfidence: true,
+		},
+		{
+			name: "Nodes with invalid bounds",
+			beforeNodes: []windows.AccessibleNode{
+				{Name: "Old", Role: "text", Bounds: [4]int{}},
+			},
+			afterNodes: []windows.AccessibleNode{
+				{Name: "New", Role: "text", Bounds: [4]int{}},
+			},
+			beforeSS:    []byte{1, 2, 3},
+			afterSS:     []byte{1, 2, 4},
+			expectLowConfidence: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evidence := ec.CollectMessageEvidence(tt.beforeNodes, tt.afterNodes, tt.beforeSS, tt.afterSS, [4]int{})
+			if tt.expectLowConfidence && evidence.Confidence >= 0.8 {
+				t.Errorf("Expected low confidence for dirty data, got %f", evidence.Confidence)
+			}
+		})
+	}
+}
+
+func TestEvidenceCollector_CalculateChatAreaDiff_DirtyData(t *testing.T) {
+	ec := NewEvidenceCollector()
+
+	tests := []struct {
+		name     string
+		before   []byte
+		after    []byte
+		bounds   [4]int
+		expected float64
+	}{
+		{
+			name:     "Empty screenshots",
+			before:   []byte{},
+			after:    []byte{},
+			bounds:   [4]int{100, 100, 200, 300},
+			expected: 0.0,
+		},
+		{
+			name:     "Nil screenshots",
+			before:   nil,
+			after:    nil,
+			bounds:   [4]int{100, 100, 200, 300},
+			expected: 0.0,
+		},
+		{
+			name:     "Invalid bounds",
+			before:   []byte{1, 2, 3},
+			after:    []byte{1, 2, 4},
+			bounds:   [4]int{},
+			expected: 0.0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			diff := ec.CalculateChatAreaDiff(tt.before, tt.after, tt.bounds)
+			if diff != tt.expected {
+				t.Errorf("Expected diff %f, got %f", tt.expected, diff)
+			}
+		})
+	}
+}
+
+// ==================== Dirty Data Tests for MessageClassifier ====================
+
+func TestMessageClassifier_ClassifyNode_DirtyData(t *testing.T) {
+	mc := NewMessageClassifier()
+
+	tests := []struct {
+		name     string
+		node     windows.AccessibleNode
+		expected NodeType
+	}{
+		{
+			name:     "Empty role",
+			node:     windows.AccessibleNode{Role: "", Bounds: [4]int{100, 400, 300, 30}},
+			expected: NodeTypeUnknown,
+		},
+		{
+			name:     "Invalid bounds",
+			node:     windows.AccessibleNode{Role: "edit", Bounds: [4]int{}},
+			expected: NodeTypeUnknown,
+		},
+		{
+			name:     "Nil bounds",
+			node:     windows.AccessibleNode{Role: "edit"},
+			expected: NodeTypeUnknown,
+		},
+		{
+			name:     "Unknown role",
+			node:     windows.AccessibleNode{Role: "unknown_role", Bounds: [4]int{100, 400, 300, 30}},
+			expected: NodeTypeUnknown,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			nodeType := mc.ClassifyNode(tt.node)
+			if nodeType != tt.expected {
+				t.Errorf("Expected %v, got %v", tt.expected, nodeType)
+			}
+		})
+	}
+}
+
+func TestMessageClassifier_FilterMessageAreaNodes_DirtyData(t *testing.T) {
+	mc := NewMessageClassifier()
+
+	tests := []struct {
+		name        string
+		nodes       []windows.AccessibleNode
+		expectedLen int
+	}{
+		{
+			name:        "Empty nodes",
+			nodes:       []windows.AccessibleNode{},
+			expectedLen: 0,
+		},
+		{
+			name: "Nodes with invalid bounds",
+			nodes: []windows.AccessibleNode{
+				{Name: "Message1", Role: "text", Bounds: [4]int{}},
+				{Name: "Message2", Role: "static", Bounds: [4]int{200, 140, 200, 30}},
+			},
+			expectedLen: 1,
+		},
+		{
+			name: "All nodes outside message area",
+			nodes: []windows.AccessibleNode{
+				{Name: "Title", Role: "text", Bounds: [4]int{10, 10, 200, 20}},
+				{Name: "Input", Role: "edit", Bounds: [4]int{100, 400, 300, 30}},
+			},
+			expectedLen: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			filtered := mc.FilterMessageAreaNodes(tt.nodes, 0)
+			if len(filtered) != tt.expectedLen {
+				t.Errorf("Expected %d filtered nodes, got %d", tt.expectedLen, len(filtered))
+			}
+		})
+	}
+}

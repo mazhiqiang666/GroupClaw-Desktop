@@ -82,7 +82,8 @@ func (r *SessionCandidateRules) IsCandidateConversation(node windows.AccessibleN
 		return false
 	}
 	bounds := node.Bounds
-	if bounds[2] <= 0 || bounds[3] <= 0 { // width or height must be positive
+	// Check for negative or zero dimensions
+	if bounds[0] < 0 || bounds[1] < 0 || bounds[2] <= 0 || bounds[3] <= 0 {
 		return false
 	}
 
@@ -228,6 +229,11 @@ func (r *PositioningStrategyRules) CalculateClickPosition(node *windows.Accessib
 	}
 
 	bounds := node.Bounds
+	// Validate bounds: width and height must be positive
+	if bounds[2] <= 0 || bounds[3] <= 0 {
+		return 0, 0, false
+	}
+
 	clickX := bounds[0] + bounds[2]/2 // center x
 	clickY := bounds[1] + bounds[3]/2 // center y
 	return clickX, clickY, true
