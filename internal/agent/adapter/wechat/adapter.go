@@ -15,21 +15,30 @@ import (
 
 // WeChatAdapter 微信桌面版适配器
 type WeChatAdapter struct {
-	config adapter.Config
-	bridge windows.BridgeInterface
+	config              adapter.Config
+	bridge              windows.BridgeInterface
+	pathSystem          *PathSystem
+	evidenceCollector   *EvidenceCollector
+	messageClassifier   *MessageClassifier
 }
 
 // NewWeChatAdapter 创建微信适配器实例
 func NewWeChatAdapter() *WeChatAdapter {
 	return &WeChatAdapter{
-		bridge: windows.NewBridge(),
+		bridge:            windows.NewBridge(),
+		pathSystem:        NewPathSystem(),
+		evidenceCollector: NewEvidenceCollector(),
+		messageClassifier: NewMessageClassifier(),
 	}
 }
 
 // NewWeChatAdapterWithBridge 创建微信适配器实例（带依赖注入）
 func NewWeChatAdapterWithBridge(bridge windows.BridgeInterface) *WeChatAdapter {
 	return &WeChatAdapter{
-		bridge: bridge,
+		bridge:            bridge,
+		pathSystem:        NewPathSystem(),
+		evidenceCollector: NewEvidenceCollector(),
+		messageClassifier: NewMessageClassifier(),
 	}
 }
 
@@ -180,20 +189,9 @@ func (a *WeChatAdapter) Detect() ([]protocol.AppInstanceRef, adapter.Result) {
 	}
 }
 
-// flattenNodes 递归扁平化 AccessibleNode 树
-func flattenNodes(nodes []windows.AccessibleNode, depth int, maxDepth int) []windows.AccessibleNode {
-	if depth >= maxDepth {
-		return nodes
-	}
-
-	result := make([]windows.AccessibleNode, 0, len(nodes))
-	for _, node := range nodes {
-		result = append(result, node)
-		if len(node.Children) > 0 {
-			result = append(result, flattenNodes(node.Children, depth+1, maxDepth)...)
-		}
-	}
-	return result
+// flattenNodes 递归扁平化 AccessibleNode 树（使用 PathSystem）
+func (a *WeChatAdapter) flattenNodes(nodes []windows.AccessibleNode, depth int, maxDepth int) []windows.AccessibleNode {
+	return a.pathSystem.FlattenNodesWithPath(nodes, "", depth, maxDepth)
 }
 
 // generateStableKey 生成稳定的定位键（包含多级上下文）
@@ -256,31 +254,6 @@ func generateNodePath(node windows.AccessibleNode, parentNode *windows.Accessibl
 	return path
 }
 
-// flattenNodesWithPath 递归扁平化 AccessibleNode 树并生成路径
-func flattenNodesWithPath(nodes []windows.AccessibleNode, parent *windows.AccessibleNode, depth int, maxDepth int, pathMap map[*windows.AccessibleNode]string) []windows.AccessibleNode {
-	if depth >= maxDepth {
-		return nodes
-	}
-
-	result := make([]windows.AccessibleNode, 0, len(nodes))
-	for i := range nodes {
-		node := &nodes[i]
-
-		// 生成路径
-		path := generateNodePath(*node, parent, pathMap)
-		pathMap[node] = path
-
-		// 添加到结果
-		result = append(result, *node)
-
-		// 递归处理子节点
-		if len(node.Children) > 0 {
-			childNodes := flattenNodesWithPath(node.Children, node, depth+1, maxDepth, pathMap)
-			result = append(result, childNodes...)
-		}
-	}
-	return result
-}
 
 // findNodeByStableKey 通过稳定定位键查找节点
 func findNodeByStableKey(flatNodes []windows.AccessibleNode, stableKey string) *windows.AccessibleNode {
@@ -418,8 +391,7 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 	}
 
 	// 递归扁平化整个节点树并生成路径
-	pathMap := make(map[*windows.AccessibleNode]string)
-	flatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
+	flatNodes := a.pathSystem.FlattenNodesWithPath(nodes, "", 0, 10)
 
 	// 获取窗口宽度用于 bounds 检查
 	// WindowInfo 没有 Bounds 字段，从第一个节点的 bounds 推断或使用默认值
@@ -445,7 +417,7 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 
 			// 生成父上下文和路径
 			parentContext := generateParentContext(*node)
-			treePath := pathMap[node]
+			treePath := node.TreePath
 			if treePath == "" {
 				treePath = fmt.Sprintf("[%d]", i)
 			}
@@ -516,8 +488,7 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 	}
 
 	// 递归扁平化节点树并生成路径
-	pathMap := make(map[*windows.AccessibleNode]string)
-	flatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
+	flatNodes := a.pathSystem.FlattenNodesWithPath(nodes, "", 0, 10)
 
 	// 3. 多级策略查找匹配的节点
 	var targetNode *windows.AccessibleNode
@@ -528,7 +499,7 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 		treePath := conv.ListNeighborhoodHint[0] // 第一个元素是路径
 		for i := range flatNodes {
 			node := &flatNodes[i]
-			if pathMap[node] == treePath && node.Name == conv.DisplayName {
+			if node.TreePath == treePath && node.Name == conv.DisplayName {
 				targetNode = node
 				locateSource = "tree_path_name"
 				break
@@ -698,8 +669,7 @@ func (a *WeChatAdapter) verifySessionActivation(conv protocol.ConversationRef, o
 	}
 
 	// 扁平化新节点并生成路径
-	pathMap := make(map[*windows.AccessibleNode]string)
-	newFlatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
+	newFlatNodes := a.pathSystem.FlattenNodesWithPath(nodes, "", 0, 10)
 
 	// 强验证策略：检查多个证据
 	evidenceCount := 0
@@ -934,9 +904,8 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	nodesBefore, nodesBeforeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
 	var messageNodesBefore []windows.AccessibleNode
 	if nodesBeforeResult.Status == adapter.StatusSuccess {
-		pathMap := make(map[*windows.AccessibleNode]string)
-		flatNodes := flattenNodesWithPath(nodesBefore, nil, 0, 10, pathMap)
-		messageNodesBefore = filterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
+		flatNodes := a.pathSystem.FlattenNodesWithPath(nodesBefore, "", 0, 10)
+		messageNodesBefore = a.messageClassifier.FilterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
 	}
 
 	// 阶段2b: 发送前截图（用于后续差异比较）
@@ -986,9 +955,8 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	nodesAfter, nodesAfterResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
 	var messageNodesAfter []windows.AccessibleNode
 	if nodesAfterResult.Status == adapter.StatusSuccess {
-		pathMap := make(map[*windows.AccessibleNode]string)
-		flatNodes := flattenNodesWithPath(nodesAfter, nil, 0, 10, pathMap)
-		messageNodesAfter = filterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
+		flatNodes := a.pathSystem.FlattenNodesWithPath(nodesAfter, "", 0, 10)
+		messageNodesAfter = a.messageClassifier.FilterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
 	}
 
 	// 阶段6b: 发送后截图（用于差异比较）
@@ -1037,7 +1005,16 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		// 回退到截图差异比较（优先比较聊天记录区）
 		if beforeResult.Status == adapter.StatusSuccess && afterResult.Status == adapter.StatusSuccess {
 			// 计算聊天区域截图差异（优先比较右侧聊天区域）
-			diffPercent := calculateChatAreaDiff(beforeScreenshot, afterScreenshot, conv.HostWindowHandle)
+			// 获取聊天区域 bounds（从消息节点推断）
+			chatAreaBounds := [4]int{}
+			if len(messageNodesAfter) > 0 {
+				// 使用第一个消息节点的 bounds 作为聊天区域参考
+				node := messageNodesAfter[0]
+				if len(node.Bounds) == 4 {
+					chatAreaBounds = node.Bounds
+				}
+			}
+			diffPercent := a.evidenceCollector.CalculateChatAreaDiff(beforeScreenshot, afterScreenshot, chatAreaBounds)
 			if diffPercent > 0.01 { // 有明显差异（>1%）
 				confidence = 1.0
 				verifyMsg = fmt.Sprintf("Chat area diff detected: %.2f%%", diffPercent*100)
@@ -1119,11 +1096,10 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 
 	if nodeResult.Status == adapter.StatusSuccess {
 		// 扁平化节点树并生成路径
-		pathMap := make(map[*windows.AccessibleNode]string)
-		flatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
+		flatNodes := a.pathSystem.FlattenNodesWithPath(nodes, "", 0, 10)
 
 		// 获取消息区域节点
-		messageNodes := filterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
+		messageNodes := a.messageClassifier.FilterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
 
 		// 检查是否有新增消息节点
 		// 策略1: 检查节点数量是否增加

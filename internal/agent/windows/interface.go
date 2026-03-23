@@ -65,4 +65,5 @@ type AccessibleNode struct {
 	ClassName   string
 	Bounds      [4]int // x, y, width, height
 	Children    []AccessibleNode
+	TreePath    string // Hierarchical path like [0].[3].[2]
 }
