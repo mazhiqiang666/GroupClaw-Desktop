@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"strconv"
+	"strings"
 
 	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
 	"github.com/yourorg/auto-customer-service/internal/agent/windows"
@@ -84,6 +85,16 @@ func main() {
 			log.Fatalf("Invalid Y coordinate: %v", err)
 		}
 		clickVerify(bridge, uintptr(handle), x, y)
+	case "click-node":
+		if len(args) < 3 {
+			log.Fatal("Usage: bridge-dump click-node <window-handle> <node-path-or-index>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		nodePath := args[2]
+		clickNode(bridge, uintptr(handle), nodePath)
 	default:
 		printUsage()
 	}
@@ -98,6 +109,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump list-nodes <handle>      - List accessibility nodes")
 	fmt.Println("  bridge-dump focus <handle>           - Focus window")
 	fmt.Println("  bridge-dump click-verify <h> <x> <y> - Click and verify (experimental)")
+	fmt.Println("  bridge-dump click-node <h> <path>    - Click node by path/index")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
@@ -113,6 +125,8 @@ func printUsage() {
 	fmt.Println("  bridge-dump list-nodes 123456 --name \"张三\"")
 	fmt.Println("  bridge-dump focus 123456")
 	fmt.Println("  bridge-dump click-verify 123456 100 200")
+	fmt.Println("  bridge-dump click-node 123456 \"[3]\"")
+	fmt.Println("  bridge-dump click-node 123456 \"[1].[2]\"")
 }
 
 func findWeChat(bridge windows.BridgeInterface) {
@@ -383,4 +397,124 @@ func clickVerify(bridge windows.BridgeInterface, handle uintptr, x, y int) {
 		fmt.Printf("  Position: (%d, %d)\n", x, y)
 		fmt.Printf("  Screenshot captured: %v (size: %d bytes)\n", len(screenshot) > 0, len(screenshot))
 	}
+}
+
+func clickNode(bridge windows.BridgeInterface, handle uintptr, nodePath string) {
+	// Focus the window first
+	focusResult := bridge.FocusWindow(handle)
+	if focusResult.Status != adapter.StatusSuccess {
+		log.Fatalf("Failed to focus window: %s", focusResult.Error)
+	}
+
+	// Enumerate accessible nodes
+	nodes, result := bridge.EnumerateAccessibleNodes(handle)
+	if result.Status != adapter.StatusSuccess {
+		log.Fatalf("Failed to enumerate nodes: %s", result.Error)
+	}
+
+	// Flatten the node tree
+	flatNodes := flattenNodes(nodes, 0, *maxDepth)
+
+	// Find the node by path or index
+	var targetNode *windows.AccessibleNode
+	var nodeIndex int
+
+	if strings.HasPrefix(nodePath, "[") && strings.HasSuffix(nodePath, "]") {
+		// Parse as index path like "[3]" or "[1].[2]"
+		indexStr := nodePath[1 : len(nodePath)-1]
+		if strings.Contains(indexStr, "].[") {
+			// Handle nested path like "[1].[2]"
+			parts := strings.Split(indexStr, "].[")
+			if len(parts) > 0 {
+				indexStr = parts[0]
+			}
+		}
+		index, err := strconv.Atoi(indexStr)
+		if err != nil || index < 0 || index >= len(flatNodes) {
+			log.Fatalf("Invalid node index: %s (valid range: 0-%d)", nodePath, len(flatNodes)-1)
+		}
+		targetNode = &flatNodes[index]
+		nodeIndex = index
+	} else {
+		// Try to parse as a simple index
+		index, err := strconv.Atoi(nodePath)
+		if err == nil && index >= 0 && index < len(flatNodes) {
+			targetNode = &flatNodes[index]
+			nodeIndex = index
+		} else {
+			// Try to find by name
+			for i, node := range flatNodes {
+				if node.Name == nodePath {
+					targetNode = &node
+					nodeIndex = i
+					break
+				}
+			}
+		}
+	}
+
+	if targetNode == nil {
+		log.Fatalf("Node not found: %s (searched %d nodes)", nodePath, len(flatNodes))
+	}
+
+	// Calculate center of node bounds
+	if len(targetNode.Bounds) != 4 {
+		log.Fatalf("Node has invalid bounds: %v", targetNode.Bounds)
+	}
+
+	bounds := targetNode.Bounds
+	clickX := bounds[0] + bounds[2]/2
+	clickY := bounds[1] + bounds[3]/2
+
+	// Click at the node center
+	clickResult := bridge.Click(handle, clickX, clickY)
+	if clickResult.Status != adapter.StatusSuccess {
+		log.Fatalf("Failed to click at (%d, %d): %s", clickX, clickY, clickResult.Error)
+	}
+
+	// Capture screenshot for verification
+	screenshot, captureResult := bridge.CaptureWindow(handle)
+	if captureResult.Status != adapter.StatusSuccess {
+		log.Printf("Warning: Failed to capture screenshot: %s", captureResult.Error)
+	}
+
+	if *jsonOutput {
+		data := map[string]interface{}{
+			"success":         true,
+			"handle":          handle,
+			"node_index":      nodeIndex,
+			"node_name":       targetNode.Name,
+			"node_role":       targetNode.Role,
+			"node_bounds":     bounds,
+			"click_x":         clickX,
+			"click_y":         clickY,
+			"screenshot":      len(screenshot) > 0,
+			"screenshot_size": len(screenshot),
+		}
+		jsonData, _ := json.MarshalIndent(data, "", "  ")
+		fmt.Println(string(jsonData))
+	} else {
+		fmt.Printf("Node click completed:\n")
+		fmt.Printf("  Window: %d\n", handle)
+		fmt.Printf("  Node: [%d] %s (%s)\n", nodeIndex, targetNode.Name, targetNode.Role)
+		fmt.Printf("  Bounds: x=%d, y=%d, w=%d, h=%d\n", bounds[0], bounds[1], bounds[2], bounds[3])
+		fmt.Printf("  Click position: (%d, %d)\n", clickX, clickY)
+		fmt.Printf("  Screenshot captured: %v (size: %d bytes)\n", len(screenshot) > 0, len(screenshot))
+	}
+}
+
+// flattenNodes recursively flattens AccessibleNode tree
+func flattenNodes(nodes []windows.AccessibleNode, depth int, maxDepth int) []windows.AccessibleNode {
+	if depth >= maxDepth {
+		return nodes
+	}
+
+	result := make([]windows.AccessibleNode, 0, len(nodes))
+	for _, node := range nodes {
+		result = append(result, node)
+		if len(node.Children) > 0 {
+			result = append(result, flattenNodes(node.Children, depth+1, maxDepth)...)
+		}
+	}
+	return result
 }
