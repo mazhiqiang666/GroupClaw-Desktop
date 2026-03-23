@@ -260,19 +260,24 @@ make test-adapter
 验证完整链路和诊断信息一致性：
 
 ```bash
-go test -v ./internal/agent/adapter/wechat -run "TestWeChatAdapter_MinimumClosedLoop" -timeout 30s
+go test -v ./internal/agent/adapter/wechat -run "TestDiagnosticFlow" -timeout 30s
 ```
 
 **测试内容：**
 - 完整链路：Scan → Focus → Send → Verify
 - 诊断信息验证：locate_source、evidence_count、delivery_state、confidence
-- Controlled nodes 测试：使用受控节点验证链路
+- 状态变化测试：验证 mockBridge 正确跟踪节点状态变化
+- 诊断一致性测试：验证所有操作的诊断信息格式正确
+
+**测试文件：**
+- `adapter_diagnostic_test.go`: 基础最小闭环诊断测试
+- `diagnostic_flow_test.go`: 完整链路诊断测试（带状态变化 mock）
 
 **验证要点：**
 - ✅ 完整链路调用成功
 - ✅ 诊断信息与规则对象一致
-- ✅ Controlled nodes 行为符合预期
-- ✅ 诊断字段格式正确
+- ✅ 状态变化 mock 行为符合预期
+- ✅ 诊断字段格式正确（confidence 2位小数）
 
 #### 3.4 执行顺序总结
 
@@ -284,7 +289,7 @@ make test-rules
 make test-adapter
 
 # 3. 最小闭环诊断测试
-go test -v ./internal/agent/adapter/wechat/adapter_diagnostic_test.go -timeout 30s
+go test -v ./internal/agent/adapter/wechat -run "TestDiagnosticFlow" -timeout 30s
 
 # 或者运行所有 WeChat 适配器测试
 make test-all
