@@ -518,16 +518,25 @@ func (r *DeliveryAssessmentRules) AssessDeliveryState(
 	messageEvidence SendVerificationEvidence,
 ) DeliveryAssessment {
 	// Calculate overall confidence (focus: 40%, message: 60%)
-	activationWeight := 0.4
-	messageWeight := 0.6
+	// If message evidence is empty (confidence 0), use focus evidence only
+	var overallConfidence float64
+	var messages []string
 
-	overallConfidence := focusEvidence.Confidence*activationWeight +
-		messageEvidence.Confidence*messageWeight
+	if messageEvidence.Confidence == 0 && messageEvidence.NewMessageNodes == 0 {
+		// Focus-only verification
+		overallConfidence = focusEvidence.Confidence
+		messages = append(messages, fmt.Sprintf("Focus-only verification: confidence=%.2f", overallConfidence))
+	} else {
+		// Combined verification
+		activationWeight := 0.4
+		messageWeight := 0.6
+		overallConfidence = focusEvidence.Confidence*activationWeight +
+			messageEvidence.Confidence*messageWeight
+		messages = append(messages, fmt.Sprintf("Combined verification: confidence=%.2f", overallConfidence))
+	}
 
 	// Determine delivery state
 	var state string
-	var messages []string
-
 	if overallConfidence >= 0.8 {
 		state = "verified"
 		messages = append(messages, fmt.Sprintf("Strong verification: confidence=%.2f", overallConfidence))
@@ -537,6 +546,13 @@ func (r *DeliveryAssessmentRules) AssessDeliveryState(
 	} else {
 		state = "unknown"
 		messages = append(messages, fmt.Sprintf("Weak verification: confidence=%.2f", overallConfidence))
+	}
+
+	return DeliveryAssessment{
+		State:      state,
+		Confidence: overallConfidence,
+		Evidence:   focusEvidence,
+		Messages:   messages,
 	}
 
 	// Add evidence details to messages

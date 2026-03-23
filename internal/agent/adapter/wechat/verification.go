@@ -486,7 +486,9 @@ func (mc *MessageClassifier) ClassifyNode(node windows.AccessibleNode) NodeType 
 	}
 
 	// Check for system prompt (often has specific role or bounds)
-	if strings.Contains(role, "alert") || strings.Contains(role, "status") {
+	// System prompts typically appear just below title area (y around 50) with small height
+	if strings.Contains(role, "alert") || strings.Contains(role, "status") ||
+		(bounds[1] >= 50 && bounds[1] < 100 && bounds[3] < 30) {
 		return NodeTypeSystemPrompt
 	}
 
