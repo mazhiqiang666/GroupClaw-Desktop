@@ -19,15 +19,15 @@ help:
 	@echo "  make build             - Build all packages"
 	@echo "  make clean             - Clean build artifacts"
 
-# WeChat adapter rule-level tests (positioning, verification, delivery assessment)
+# WeChat adapter rule-level tests (positioning, verification, delivery assessment, path, evidence, message classification)
 test-rules:
 	@echo "$(YELLOW)Running WeChat adapter rule-level tests...$(NC)"
-	go test -v ./internal/agent/adapter/wechat/positioning_strategy_test.go ./internal/agent/adapter/wechat/activation_verification_test.go ./internal/agent/adapter/wechat/message_verification_test.go ./internal/agent/adapter/wechat/delivery_assessment_test.go ./internal/agent/adapter/wechat/rules_test.go ./internal/agent/adapter/wechat/regression_test.go -timeout 30s
+	go test -v ./internal/agent/adapter/wechat/positioning_strategy_test.go ./internal/agent/adapter/wechat/activation_verification_test.go ./internal/agent/adapter/wechat/message_verification_test.go ./internal/agent/adapter/wechat/delivery_assessment_test.go ./internal/agent/adapter/wechat/rules_test.go ./internal/agent/adapter/wechat/regression_test.go ./internal/agent/adapter/wechat/path_system_test.go ./internal/agent/adapter/wechat/evidence_collector_test.go ./internal/agent/adapter/wechat/message_classifier_test.go -timeout 30s
 
 # WeChat adapter flow tests (basic Detect, Scan, Focus, Send, Verify)
 test-adapter:
 	@echo "$(YELLOW)Running WeChat adapter flow tests...$(NC)"
-	go test -v ./internal/agent/adapter/wechat/adapter_test.go -timeout 30s
+	go test -v ./internal/agent/adapter/wechat/adapter_test.go ./internal/agent/adapter/wechat/adapter_diagnostic_test.go -timeout 30s
 
 # Unit tests (fast, no external dependencies)
 test-unit:

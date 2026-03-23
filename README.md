@@ -206,6 +206,96 @@ task test-gateway
 task test-all
 ```
 
+### 3. 测试联调 SOP
+
+遵循以下顺序进行测试联调，确保最小闭环验证：
+
+#### 3.1 规则级测试（第一步）
+
+验证所有规则逻辑的正确性：
+
+```bash
+make test-rules
+```
+
+**测试内容：**
+- 定位策略测试 (`positioning_strategy_test.go`)
+- 激活验证测试 (`activation_verification_test.go`)
+- 消息验证测试 (`message_verification_test.go`)
+- 交付评估测试 (`delivery_assessment_test.go`)
+- 会话候选规则测试 (`rules_test.go`)
+- 回归测试 (`regression_test.go`)
+- 路径系统测试 (`path_system_test.go`)
+- 证据收集器测试 (`evidence_collector_test.go`)
+- 消息分类器测试 (`message_classifier_test.go`)
+
+**验证要点：**
+- ✅ locate_source 字段正确
+- ✅ evidence_count 计数准确
+- ✅ confidence 置信度格式正确（2位小数）
+- ✅ delivery_state 状态流转正确
+
+#### 3.2 适配器流程测试（第二步）
+
+验证基本流程的正确性：
+
+```bash
+make test-adapter
+```
+
+**测试内容：**
+- Detect: 检测应用实例
+- Scan: 扫描会话列表
+- Focus: 切换到目标会话
+- Send: 发送消息
+- Verify: 验证消息发送
+
+**验证要点：**
+- ✅ 五个基本流程调用成功
+- ✅ Mock bridge 行为符合预期
+- ✅ 返回结果状态正确
+
+#### 3.3 最小闭环诊断测试（第三步）
+
+验证完整链路和诊断信息一致性：
+
+```bash
+go test -v ./internal/agent/adapter/wechat/adapter_diagnostic_test.go -timeout 30s
+```
+
+**测试内容：**
+- 完整链路：Scan → Focus → Send → Verify
+- 诊断信息验证：locate_source、evidence_count、delivery_state、confidence
+- Controlled nodes 测试：使用受控节点验证链路
+
+**验证要点：**
+- ✅ 完整链路调用成功
+- ✅ 诊断信息与规则对象一致
+- ✅ Controlled nodes 行为符合预期
+- ✅ 诊断字段格式正确
+
+#### 3.4 执行顺序总结
+
+```bash
+# 1. 规则级测试
+make test-rules
+
+# 2. 适配器流程测试
+make test-adapter
+
+# 3. 最小闭环诊断测试
+go test -v ./internal/agent/adapter/wechat/adapter_diagnostic_test.go -timeout 30s
+
+# 或者运行所有 WeChat 适配器测试
+make test-all
+```
+
+**注意事项：**
+- 先运行 `test-rules` 确保规则逻辑正确
+- 再运行 `test-adapter` 确保流程调用正确
+- 最后运行最小闭环测试验证完整链路
+- 如果任何一步失败，先修复失败的测试再继续
+
 ### 3. 运行 Mock Chat App
 
 ```bash

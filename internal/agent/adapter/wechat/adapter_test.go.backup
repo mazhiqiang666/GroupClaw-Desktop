@@ -173,7 +173,7 @@ func (m *mockBridge) Release() {
 	m.initialized = false
 }
 
-// ==================== Basic Flow Tests (Minimum Required) ====================
+// ==================== Basic Flow Tests ====================
 
 func TestWeChatAdapter_Detect(t *testing.T) {
 	mock := newMockBridge()
@@ -275,5 +275,147 @@ func TestWeChatAdapter_Verify(t *testing.T) {
 	}
 	if msg != nil {
 		t.Error("Verify should return nil message for stub implementation")
+	}
+}
+
+// ==================== Edge Case Tests ====================
+
+func TestWeChatAdapter_Detect_NoWindow(t *testing.T) {
+	mock := newMockBridge()
+	mock.findResult = []uintptr{}
+	wechatAdapter := NewWeChatAdapterWithBridge(mock)
+
+	instances, result := wechatAdapter.Detect()
+
+	if result.Status != adapter.StatusSuccess {
+		t.Errorf("Detect should succeed even with no windows, got status: %v", result.Status)
+	}
+	if len(instances) != 0 {
+		t.Errorf("Expected 0 instances, got %d", len(instances))
+	}
+}
+
+func TestWeChatAdapter_Scan_NoWindow(t *testing.T) {
+	mock := newMockBridge()
+	mock.findResult = []uintptr{}
+	wechatAdapter := NewWeChatAdapterWithBridge(mock)
+
+	instance := protocol.AppInstanceRef{
+		AppID:      "wechat",
+		InstanceID: "微信",
+	}
+
+	conversations, result := wechatAdapter.Scan(instance)
+
+	if result.Status != adapter.StatusSuccess {
+		t.Errorf("Scan should succeed even with no windows, got status: %v", result.Status)
+	}
+	if len(conversations) != 0 {
+		t.Errorf("Expected 0 conversations, got %d", len(conversations))
+	}
+}
+
+func TestWeChatAdapter_Detect_BridgeError(t *testing.T) {
+	mock := newMockBridge()
+	mock.findError = adapter.Result{
+		Status:     adapter.StatusFailed,
+		ReasonCode: adapter.ReasonCode("BRIDGE_ERROR"),
+		Error:      "Bridge error occurred",
+	}
+	wechatAdapter := NewWeChatAdapterWithBridge(mock)
+
+	instances, result := wechatAdapter.Detect()
+
+	if result.Status != adapter.StatusFailed {
+		t.Errorf("Detect should fail when bridge fails, got status: %v", result.Status)
+	}
+	if instances != nil {
+		t.Error("Detect should return nil instances on bridge error")
+	}
+}
+
+func TestWeChatAdapter_Scan_BridgeError(t *testing.T) {
+	mock := newMockBridge()
+	mock.findError = adapter.Result{
+		Status:     adapter.StatusFailed,
+		ReasonCode: adapter.ReasonCode("BRIDGE_ERROR"),
+		Error:      "Bridge error occurred",
+	}
+	wechatAdapter := NewWeChatAdapterWithBridge(mock)
+
+	instance := protocol.AppInstanceRef{
+		AppID:      "wechat",
+		InstanceID: "微信",
+	}
+
+	conversations, result := wechatAdapter.Scan(instance)
+
+	if result.Status != adapter.StatusFailed {
+		t.Errorf("Scan should fail when bridge fails, got status: %v", result.Status)
+	}
+	if conversations != nil {
+		t.Error("Scan should return nil conversations on bridge error")
+	}
+}
+
+func TestWeChatAdapter_Verify_EmptyContent(t *testing.T) {
+	mock := newMockBridge()
+	wechatAdapter := NewWeChatAdapterWithBridge(mock)
+
+	conv := protocol.ConversationRef{
+		HostWindowHandle: 12345,
+	}
+
+	_, result := wechatAdapter.Verify(conv, "", 5)
+
+	if result.Status != adapter.StatusSuccess {
+		t.Errorf("Verify should succeed even with empty content, got status: %v", result.Status)
+	}
+}
+
+func TestWeChatAdapter_Verify_ZeroTimeout(t *testing.T) {
+	mock := newMockBridge()
+	wechatAdapter := NewWeChatAdapterWithBridge(mock)
+
+	conv := protocol.ConversationRef{
+		HostWindowHandle: 12345,
+	}
+
+	msg, result := wechatAdapter.Verify(conv, "Hello", 0)
+
+	if result.Status != adapter.StatusSuccess {
+		t.Errorf("Verify should succeed even with zero timeout, got status: %v", result.Status)
+	}
+	if msg != nil {
+		t.Error("Verify should return nil message for stub implementation")
+	}
+}
+
+// ==================== Integration Flow Test ====================
+
+func TestWeChatAdapter_Integration_DetectAndScan(t *testing.T) {
+	mock := newMockBridge()
+	mock.findResult = []uintptr{12345}
+	mock.windowClass = "WeChatMainWndForPC"
+	mock.windowTitle = "微信"
+	wechatAdapter := NewWeChatAdapterWithBridge(mock)
+
+	// Step 1: Detect instances
+	instances, detectResult := wechatAdapter.Detect()
+	if detectResult.Status != adapter.StatusSuccess {
+		t.Errorf("Detect should succeed, got status: %v", detectResult.Status)
+	}
+	if len(instances) == 0 {
+		t.Error("Detect should find at least one instance")
+		return
+	}
+
+	// Step 2: Scan conversations for first instance
+	conversations, scanResult := wechatAdapter.Scan(instances[0])
+	if scanResult.Status != adapter.StatusSuccess {
+		t.Errorf("Scan should succeed, got status: %v", scanResult.Status)
+	}
+	if len(conversations) == 0 {
+		t.Error("Scan should return at least one conversation")
 	}
 }
