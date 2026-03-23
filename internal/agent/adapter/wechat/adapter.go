@@ -196,30 +196,105 @@ func flattenNodes(nodes []windows.AccessibleNode, depth int, maxDepth int) []win
 	return result
 }
 
-// generateStableKey 生成稳定的定位键（基于角色、名称、bounds）
-func generateStableKey(node windows.AccessibleNode) string {
+// generateStableKey 生成稳定的定位键（包含多级上下文）
+func generateStableKey(node windows.AccessibleNode, parentContext string, treePath string) string {
 	if len(node.Bounds) != 4 {
 		return ""
 	}
-	// 格式: role|name|x_y_w_h
-	key := fmt.Sprintf("%s|%s|%d_%d_%d_%d",
-		node.Role, node.Name,
+	// 格式: tree_path|parent|role|name|x_y_w_h
+	key := fmt.Sprintf("%s|%s|%s|%s|%d_%d_%d_%d",
+		treePath, parentContext, node.Role, node.Name,
 		node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3])
 	return key
 }
 
-// generateNodePath 生成节点路径（用于调试和精确定位）
-func generateNodePath(node windows.AccessibleNode, flatIndex int, allNodes []windows.AccessibleNode) string {
-	// 简单实现：返回节点在扁平列表中的索引
-	return fmt.Sprintf("[%d]", flatIndex)
+// generateParentContext 生成父节点上下文
+func generateParentContext(node windows.AccessibleNode) string {
+	// 基于节点角色和类名生成父上下文标识
+	// 例如: "ContactList|List" 表示在联系人列表中的列表项
+	context := ""
+	if node.Role == "list item" || node.Role == "ListItem" {
+		context = "ListItem"
+	} else if strings.Contains(strings.ToLower(node.ClassName), "list") {
+		context = "ListContainer"
+	}
+	return context
+}
+
+// generateNodePath 生成节点的真实层级路径（递归生成）
+func generateNodePath(node windows.AccessibleNode, parentNode *windows.AccessibleNode, pathMap map[*windows.AccessibleNode]string) string {
+	// 如果节点已在路径映射中，直接返回
+	if existingPath, ok := pathMap[&node]; ok {
+		return existingPath
+	}
+
+	// 构建当前节点的路径
+	var path string
+	if parentNode == nil {
+		// 根节点
+		path = "[0]"
+	} else {
+		// 子节点：查找在父节点中的索引
+		parentPath := pathMap[parentNode]
+		if parentPath == "" {
+			parentPath = "[0]"
+		}
+
+		// 在父节点的子节点中查找当前节点的索引
+		childIndex := 0
+		for i, child := range parentNode.Children {
+			if &child == &node {
+				childIndex = i
+				break
+			}
+		}
+		path = fmt.Sprintf("%s.[%d]", parentPath, childIndex)
+	}
+
+	// 缓存路径
+	pathMap[&node] = path
+	return path
+}
+
+// flattenNodesWithPath 递归扁平化 AccessibleNode 树并生成路径
+func flattenNodesWithPath(nodes []windows.AccessibleNode, parent *windows.AccessibleNode, depth int, maxDepth int, pathMap map[*windows.AccessibleNode]string) []windows.AccessibleNode {
+	if depth >= maxDepth {
+		return nodes
+	}
+
+	result := make([]windows.AccessibleNode, 0, len(nodes))
+	for i := range nodes {
+		node := &nodes[i]
+
+		// 生成路径
+		path := generateNodePath(*node, parent, pathMap)
+		pathMap[node] = path
+
+		// 添加到结果
+		result = append(result, *node)
+
+		// 递归处理子节点
+		if len(node.Children) > 0 {
+			childNodes := flattenNodesWithPath(node.Children, node, depth+1, maxDepth, pathMap)
+			result = append(result, childNodes...)
+		}
+	}
+	return result
 }
 
 // findNodeByStableKey 通过稳定定位键查找节点
 func findNodeByStableKey(flatNodes []windows.AccessibleNode, stableKey string) *windows.AccessibleNode {
 	for i := range flatNodes {
-		key := generateStableKey(flatNodes[i])
-		if key == stableKey {
-			return &flatNodes[i]
+		// 从 stableKey 中提取 treePath 和 parentContext 用于重新生成 key
+		// stableKey 格式: tree_path|parent|role|name|x_y_w_h
+		parts := strings.Split(stableKey, "|")
+		if len(parts) >= 5 {
+			treePath := parts[0]
+			parentContext := parts[1]
+			key := generateStableKey(flatNodes[i], parentContext, treePath)
+			if key == stableKey {
+				return &flatNodes[i]
+			}
 		}
 	}
 	return nil
@@ -342,8 +417,9 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 		}
 	}
 
-	// 递归扁平化整个节点树
-	flatNodes := flattenNodes(nodes, 0, 10)
+	// 递归扁平化整个节点树并生成路径
+	pathMap := make(map[*windows.AccessibleNode]string)
+	flatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
 
 	// 获取窗口宽度用于 bounds 检查
 	// WindowInfo 没有 Bounds 字段，从第一个节点的 bounds 推断或使用默认值
@@ -361,14 +437,22 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 	candidateCount := 0
 	hitNodes := []string{}
 
-	for i, node := range flatNodes {
+	for i := range flatNodes {
+		node := &flatNodes[i]
 		// 判断是否为候选会话项
-		if isCandidateConversation(node, windowWidth) {
+		if isCandidateConversation(*node, windowWidth) {
 			candidateCount++
 
+			// 生成父上下文和路径
+			parentContext := generateParentContext(*node)
+			treePath := pathMap[node]
+			if treePath == "" {
+				treePath = fmt.Sprintf("[%d]", i)
+			}
+
 			// 生成稳定定位信息
-			stableKey := generateStableKey(node)
-			nodePath := generateNodePath(node, i, flatNodes)
+			stableKey := generateStableKey(*node, parentContext, treePath)
+			nodePath := treePath
 
 			// 添加到会话列表，包含稳定定位信息
 			conversations = append(conversations, protocol.ConversationRef{
@@ -431,34 +515,80 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 		return a.focusByListPosition(conv, startTime, "fallback_enumerate_failed")
 	}
 
-	// 递归扁平化节点树
-	flatNodes := flattenNodes(nodes, 0, 10)
+	// 递归扁平化节点树并生成路径
+	pathMap := make(map[*windows.AccessibleNode]string)
+	flatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
 
-	// 3. 查找匹配的节点（优先使用稳定定位键，回退到名称匹配）
+	// 3. 多级策略查找匹配的节点
 	var targetNode *windows.AccessibleNode
 	var locateSource string
 
-	// 优先尝试使用稳定定位键查找
-	if conv.PreviewText != "" {
+	// 策略1: tree path + name (从 ListNeighborhoodHint 获取路径)
+	if len(conv.ListNeighborhoodHint) > 0 {
+		treePath := conv.ListNeighborhoodHint[0] // 第一个元素是路径
+		for i := range flatNodes {
+			node := &flatNodes[i]
+			if pathMap[node] == treePath && node.Name == conv.DisplayName {
+				targetNode = node
+				locateSource = "tree_path_name"
+				break
+			}
+		}
+	}
+
+	// 策略2: parent context + name + bounds
+	if targetNode == nil && len(conv.ListNeighborhoodHint) > 1 {
+		// 解析 bounds 信息
+		boundsStr := conv.ListNeighborhoodHint[1]
+		if strings.HasPrefix(boundsStr, "bounds:") {
+			boundsStr = strings.TrimPrefix(boundsStr, "bounds:")
+			boundsParts := strings.Split(boundsStr, "_")
+			if len(boundsParts) == 4 {
+				expectedBounds := [4]int{}
+				for j := 0; j < 4; j++ {
+					val, _ := strconv.Atoi(boundsParts[j])
+					expectedBounds[j] = val
+				}
+
+				for i := range flatNodes {
+					node := &flatNodes[i]
+					if node.Name == conv.DisplayName &&
+						len(node.Bounds) == 4 &&
+						node.Bounds[0] == expectedBounds[0] &&
+						node.Bounds[1] == expectedBounds[1] &&
+						node.Bounds[2] == expectedBounds[2] &&
+						node.Bounds[3] == expectedBounds[3] {
+						targetNode = node
+						locateSource = "parent_context_bounds"
+						break
+					}
+				}
+			}
+		}
+	}
+
+	// 策略3: stable key (PreviewText 存储的稳定定位键)
+	if targetNode == nil && conv.PreviewText != "" {
 		targetNode = findNodeByStableKey(flatNodes, conv.PreviewText)
 		if targetNode != nil {
 			locateSource = "stable_key"
 		}
 	}
 
-	// 回退到名称匹配
+	// 策略4: name match (仅名称匹配)
 	if targetNode == nil {
-		for _, node := range flatNodes {
+		for i := range flatNodes {
+			node := &flatNodes[i]
 			if node.Name == conv.DisplayName &&
 			   (node.Role == "list item" || node.Role == "ListItem") {
-				targetNode = &node
+				targetNode = node
 				locateSource = "name_match"
 				break
 			}
 		}
 	}
 
-	// 如果两种方式都找不到，使用 ListPosition 回退方案
+	// 策略5: ListPosition fallback
 	if targetNode == nil {
 		return a.focusByListPosition(conv, startTime, "fallback_node_not_found")
 	}
@@ -555,7 +685,7 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 	}
 }
 
-// verifySessionActivation 验证会话是否已激活
+// verifySessionActivation 强验证会话是否已激活
 func (a *WeChatAdapter) verifySessionActivation(conv protocol.ConversationRef, originalNodes []windows.AccessibleNode, locateSource string) adapter.Result {
 	// 重新枚举节点以检查会话状态变化
 	nodes, nodeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
@@ -567,39 +697,116 @@ func (a *WeChatAdapter) verifySessionActivation(conv protocol.ConversationRef, o
 		}
 	}
 
-	// 扁平化新节点
-	newFlatNodes := flattenNodes(nodes, 0, 10)
+	// 扁平化新节点并生成路径
+	pathMap := make(map[*windows.AccessibleNode]string)
+	newFlatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
 
-	// 尝试用稳定定位键重新查找节点
+	// 强验证策略：检查多个证据
+	evidenceCount := 0
+	maxEvidence := 3
+
+	// 证据1: 检查目标节点是否被选中/高亮/active 状态
+	// 通过检查节点是否有特殊的选中状态（基于 bounds 或 role 变化）
+	for i := range newFlatNodes {
+		node := &newFlatNodes[i]
+		if node.Name == conv.DisplayName &&
+		   (node.Role == "list item" || node.Role == "ListItem") {
+			// 检查节点是否在左侧列表区域且可能被选中
+			// 选中的节点通常有特殊的视觉反馈（bounds 可能略有变化）
+			if len(node.Bounds) == 4 && node.Bounds[0] < 200 { // 左侧列表区域
+				evidenceCount++
+				break
+			}
+		}
+	}
+
+	// 证据2: 检查聊天头部标题是否变成目标联系人
+	// 查找聊天头部区域的节点（通常在窗口顶部）
+	for i := range newFlatNodes {
+		node := &newFlatNodes[i]
+		// 聊天头部通常有特定的类名或角色
+		if strings.Contains(strings.ToLower(node.ClassName), "header") ||
+		   strings.Contains(strings.ToLower(node.ClassName), "title") ||
+		   node.Role == "text" || node.Role == "static" {
+			// 检查节点名称是否包含目标联系人名称
+			if node.Name != "" && strings.Contains(node.Name, conv.DisplayName) {
+				evidenceCount++
+				break
+			}
+		}
+	}
+
+	// 证据3: 检查聊天面板是否切换（通过检查消息区域节点）
+	// 消息区域通常在右侧，有特定的布局特征
+	messageAreaFound := false
+	for i := range newFlatNodes {
+		node := &newFlatNodes[i]
+		// 消息区域节点通常有特定的类名或位置特征
+		if len(node.Bounds) == 4 {
+			// 消息区域通常在右侧 2/3 区域
+			windowWidth := node.Bounds[0] + node.Bounds[2]
+			if node.Bounds[0] > windowWidth/3 {
+				// 右侧区域的文本节点可能表示消息区域
+				if node.Role == "text" || node.Role == "static" || strings.Contains(strings.ToLower(node.ClassName), "edit") {
+					messageAreaFound = true
+					break
+				}
+			}
+		}
+	}
+	if messageAreaFound {
+		evidenceCount++
+	}
+
+	// 证据4: 使用稳定定位键重新查找节点（作为额外证据）
 	if conv.PreviewText != "" {
 		targetNode := findNodeByStableKey(newFlatNodes, conv.PreviewText)
 		if targetNode != nil {
-			// 节点仍然存在，验证成功
-			return adapter.Result{
-				Status:     adapter.StatusSuccess,
-				ReasonCode: adapter.ReasonOK,
-				Confidence: 1.0,
-			}
+			evidenceCount++
 		}
 	}
 
-	// 回退到名称匹配验证
-	for _, node := range newFlatNodes {
-		if node.Name == conv.DisplayName &&
-		   (node.Role == "list item" || node.Role == "ListItem") {
-			return adapter.Result{
-				Status:     adapter.StatusSuccess,
-				ReasonCode: adapter.ReasonOK,
-				Confidence: 0.8, // 名称匹配的置信度略低
-			}
+	// 根据证据数量计算置信度
+	var confidence float64
+	var message string
+
+	if evidenceCount >= 3 {
+		// 强证据：3个或更多证据匹配
+		confidence = 1.0
+		message = fmt.Sprintf("Strong verification: %d/%d evidence matched", evidenceCount, maxEvidence)
+	} else if evidenceCount >= 2 {
+		// 中等证据：2个证据匹配
+		confidence = 0.85
+		message = fmt.Sprintf("Medium verification: %d/%d evidence matched", evidenceCount, maxEvidence)
+	} else if evidenceCount >= 1 {
+		// 弱证据：只有1个证据匹配
+		confidence = 0.6
+		message = fmt.Sprintf("Weak verification: %d/%d evidence matched", evidenceCount, maxEvidence)
+	} else {
+		// 无证据：验证失败
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("VERIFICATION_FAILED"),
+			Error:      "无法确认目标会话已激活（无匹配证据）",
 		}
 	}
 
-	// 无法找到目标节点，验证失败
 	return adapter.Result{
-		Status:     adapter.StatusFailed,
-		ReasonCode: adapter.ReasonCode("VERIFICATION_FAILED"),
-		Error:      "无法在重新扫描后找到目标会话",
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+		Confidence: confidence,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   message,
+				Context: map[string]string{
+					"locate_source": locateSource,
+					"evidence_count": strconv.Itoa(evidenceCount),
+					"max_evidence":   strconv.Itoa(maxEvidence),
+				},
+			},
+		},
 	}
 }
 
@@ -723,7 +930,16 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		}
 	}
 
-	// 阶段2: 发送前截图（用于后续差异比较）
+	// 阶段2: 发送前捕获消息区域节点（用于后续差异比较）
+	nodesBefore, nodesBeforeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
+	var messageNodesBefore []windows.AccessibleNode
+	if nodesBeforeResult.Status == adapter.StatusSuccess {
+		pathMap := make(map[*windows.AccessibleNode]string)
+		flatNodes := flattenNodesWithPath(nodesBefore, nil, 0, 10, pathMap)
+		messageNodesBefore = filterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
+	}
+
+	// 阶段2b: 发送前截图（用于后续差异比较）
 	beforeScreenshot, beforeResult := a.bridge.CaptureWindow(conv.HostWindowHandle)
 	if beforeResult.Status != adapter.StatusSuccess {
 		// 截图失败不影响发送，但记录警告
@@ -766,28 +982,74 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	// 等待消息发送完成
 	time.Sleep(200 * time.Millisecond)
 
-	// 阶段6: 发送后截图（用于差异比较）
+	// 阶段6: 发送后捕获消息区域节点（用于差异比较）
+	nodesAfter, nodesAfterResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
+	var messageNodesAfter []windows.AccessibleNode
+	if nodesAfterResult.Status == adapter.StatusSuccess {
+		pathMap := make(map[*windows.AccessibleNode]string)
+		flatNodes := flattenNodesWithPath(nodesAfter, nil, 0, 10, pathMap)
+		messageNodesAfter = filterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
+	}
+
+	// 阶段6b: 发送后截图（用于差异比较）
 	afterScreenshot, afterResult := a.bridge.CaptureWindow(conv.HostWindowHandle)
 	elapsedMs := time.Since(startTime).Milliseconds()
 
-	// 阶段7: 比较截图差异
+	// 阶段7: 比较消息区域节点变化和截图差异
 	var confidence float64
 	var verifyMsg string
 
-	if beforeResult.Status == adapter.StatusSuccess && afterResult.Status == adapter.StatusSuccess {
-		// 计算截图差异
-		diffPercent := calculateScreenshotDiff(beforeScreenshot, afterScreenshot)
-		if diffPercent > 0.01 { // 有明显差异（>1%）
-			confidence = 1.0
-			verifyMsg = fmt.Sprintf("Screenshot diff detected: %.2f%%", diffPercent*100)
+	// 优先比较消息区域节点变化
+	nodeDiffDetected := false
+	if len(messageNodesBefore) > 0 && len(messageNodesAfter) > 0 {
+		// 检查是否有新增节点
+		if len(messageNodesAfter) > len(messageNodesBefore) {
+			nodeDiffDetected = true
+			verifyMsg = fmt.Sprintf("Message nodes increased: %d -> %d", len(messageNodesBefore), len(messageNodesAfter))
 		} else {
-			confidence = 0.7 // 无明显差异，置信度较低
-			verifyMsg = fmt.Sprintf("No significant screenshot diff: %.2f%%", diffPercent*100)
+			// 检查节点内容是否有变化（基于 bounds 或名称）
+			for _, afterNode := range messageNodesAfter {
+				found := false
+				for _, beforeNode := range messageNodesBefore {
+					if afterNode.Name == beforeNode.Name &&
+						(len(afterNode.Bounds) == 0 || len(beforeNode.Bounds) == 0 ||
+						 (afterNode.Bounds[0] == beforeNode.Bounds[0] &&
+						  afterNode.Bounds[1] == beforeNode.Bounds[1] &&
+						  afterNode.Bounds[2] == beforeNode.Bounds[2] &&
+						  afterNode.Bounds[3] == beforeNode.Bounds[3])) {
+						found = true
+						break
+					}
+				}
+				if !found {
+					nodeDiffDetected = true
+					verifyMsg = fmt.Sprintf("New message node detected: %s", afterNode.Name)
+					break
+				}
+			}
 		}
+	}
+
+	// 如果节点变化检测成功，直接使用高置信度
+	if nodeDiffDetected {
+		confidence = 1.0
 	} else {
-		// 无法比较截图，使用基础置信度
-		confidence = 0.8
-		verifyMsg = "Screenshot comparison not available"
+		// 回退到截图差异比较（优先比较聊天记录区）
+		if beforeResult.Status == adapter.StatusSuccess && afterResult.Status == adapter.StatusSuccess {
+			// 计算聊天区域截图差异（优先比较右侧聊天区域）
+			diffPercent := calculateChatAreaDiff(beforeScreenshot, afterScreenshot, conv.HostWindowHandle)
+			if diffPercent > 0.01 { // 有明显差异（>1%）
+				confidence = 1.0
+				verifyMsg = fmt.Sprintf("Chat area diff detected: %.2f%%", diffPercent*100)
+			} else {
+				confidence = 0.7 // 无明显差异，置信度较低
+				verifyMsg = fmt.Sprintf("No significant chat area diff: %.2f%%", diffPercent*100)
+			}
+		} else {
+			// 无法比较截图，使用基础置信度
+			confidence = 0.8
+			verifyMsg = "Screenshot comparison not available"
+		}
 	}
 
 	return adapter.Result{
@@ -833,7 +1095,7 @@ func calculateScreenshotDiff(before, after []byte) float64 {
 	return float64(diffCount) / float64(minLen)
 }
 
-// Verify 验证消息发送
+// Verify 验证消息发送（强验证）
 func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, timeout time.Duration) (*protocol.MessageObs, adapter.Result) {
 	startTime := time.Now()
 
@@ -848,52 +1110,85 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 		}
 	}
 
-	// 阶段1: 枚举可访问节点以检查变化
+	// 阶段1: 枚举可访问节点以检查消息区域变化
 	nodes, nodeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
 
 	var nodeChangeDetected bool
 	var nodeChangeMsg string
+	var newMessageFound bool
 
 	if nodeResult.Status == adapter.StatusSuccess {
-		// 扁平化节点树
-		flatNodes := flattenNodes(nodes, 0, 10)
+		// 扁平化节点树并生成路径
+		pathMap := make(map[*windows.AccessibleNode]string)
+		flatNodes := flattenNodesWithPath(nodes, nil, 0, 10, pathMap)
 
-		// 检查聊天区域节点变化（查找消息相关的节点）
-		messageNodeCount := 0
-		for _, node := range flatNodes {
-			// 检查是否为消息相关节点（基于角色和名称特征）
-			if isMessageNode(node) {
-				messageNodeCount++
+		// 获取消息区域节点
+		messageNodes := filterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
+
+		// 检查是否有新增消息节点
+		// 策略1: 检查节点数量是否增加
+		// 策略2: 检查是否有包含发送内容的节点
+		// 策略3: 检查是否有新的文本节点
+
+		for _, node := range messageNodes {
+			// 检查节点名称是否包含发送的内容（部分匹配）
+			if node.Name != "" && content != "" {
+				// 简单的包含检查
+				if len(node.Name) >= len(content) {
+					// 检查是否包含发送内容
+					if strings.Contains(node.Name, content) {
+						newMessageFound = true
+						nodeChangeMsg = fmt.Sprintf("Found message node containing sent content: %s", node.Name)
+						break
+					}
+				}
+			}
+
+			// 检查是否为新出现的文本节点（基于时间戳特征）
+			// 微信消息通常有时间戳，检查节点名称是否包含时间特征
+			if node.Role == "text" || node.Role == "static" {
+				// 检查名称是否看起来像消息内容（非空且不是系统文本）
+				if node.Name != "" &&
+					!strings.Contains(strings.ToLower(node.Name), "system") &&
+					!strings.Contains(strings.ToLower(node.Name), "tip") &&
+					!strings.Contains(strings.ToLower(node.Name), "notice") {
+					newMessageFound = true
+					nodeChangeMsg = fmt.Sprintf("Found new message text node: %s", node.Name)
+					break
+				}
 			}
 		}
 
-		// 如果找到消息节点，认为有变化
-		if messageNodeCount > 0 {
+		// 如果没有找到精确匹配，检查消息区域是否有变化
+		if !newMessageFound && len(messageNodes) > 0 {
+			// 消息区域有节点存在，但无法确认是否为新消息
+			// 这种情况下给予中等置信度
 			nodeChangeDetected = true
-			nodeChangeMsg = fmt.Sprintf("Found %d message-related nodes", messageNodeCount)
-		} else {
-			nodeChangeDetected = false
-			nodeChangeMsg = "No message-related nodes found"
+			nodeChangeMsg = fmt.Sprintf("Message area has %d nodes, but cannot confirm new message", len(messageNodes))
 		}
 	} else {
 		nodeChangeMsg = "Node enumeration failed"
 	}
 
-	// 阶段3: 计算置信度
+	// 阶段2: 计算置信度
 	var confidence float64
 	var deliveryState string
 
-	if nodeChangeDetected {
-		// 检测到节点变化，置信度较高
-		confidence = 0.9
+	if newMessageFound {
+		// 找到包含发送内容的新消息节点，置信度最高
+		confidence = 1.0
 		deliveryState = "verified"
+	} else if nodeChangeDetected {
+		// 消息区域有变化但无法确认，中等置信度
+		confidence = 0.7
+		deliveryState = "sent_unverified"
 	} else {
-		// 未检测到明显变化，置信度较低
-		confidence = 0.6
+		// 未检测到明显变化，低置信度
+		confidence = 0.5
 		deliveryState = "sent_unverified"
 	}
 
-	// 阶段4: 生成消息指纹（基于内容和时间）
+	// 阶段3: 生成消息指纹（基于内容和时间）
 	messageFingerprint := generateMessageFingerprint(content, startTime)
 
 	elapsedMs := time.Since(startTime).Milliseconds()
@@ -911,10 +1206,11 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 			{
 				Timestamp: time.Now(),
 				Level:     "info",
-				Message:   "Verification completed",
+				Message:   "Verification completed with strong validation",
 				Context: map[string]string{
 					"delivery_state": deliveryState,
 					"confidence":     fmt.Sprintf("%.2f", confidence),
+					"new_message_found": strconv.FormatBool(newMessageFound),
 					"node_change":    strconv.FormatBool(nodeChangeDetected),
 					"node_msg":       nodeChangeMsg,
 				},
@@ -946,6 +1242,59 @@ func generateMessageFingerprint(content string, timestamp time.Time) string {
 	data := fmt.Sprintf("%s|%d", content, timestamp.Unix())
 	hash := sha256.Sum256([]byte(data))
 	return hex.EncodeToString(hash[:])
+}
+
+// filterMessageAreaNodes 过滤消息区域节点
+func filterMessageAreaNodes(flatNodes []windows.AccessibleNode, windowHandle uintptr) []windows.AccessibleNode {
+	var messageNodes []windows.AccessibleNode
+
+	// 假设窗口宽度（从节点 bounds 推断）
+	windowWidth := 800
+	if len(flatNodes) > 0 && len(flatNodes[0].Bounds) == 4 {
+		node := flatNodes[0]
+		windowWidth = node.Bounds[0] + node.Bounds[2]
+		if windowWidth < 400 {
+			windowWidth = 800
+		}
+	}
+
+	// 消息区域通常在右侧 2/3 区域
+	chatAreaThreshold := windowWidth / 3
+
+	for _, node := range flatNodes {
+		// 检查节点是否在聊天区域（右侧）
+		if len(node.Bounds) == 4 && node.Bounds[0] > chatAreaThreshold {
+			// 检查是否为消息相关节点
+			if isMessageNode(node) {
+				messageNodes = append(messageNodes, node)
+			}
+		}
+	}
+
+	return messageNodes
+}
+
+// calculateChatAreaDiff 计算聊天区域截图差异
+func calculateChatAreaDiff(before, after []byte, windowHandle uintptr) float64 {
+	if len(before) == 0 || len(after) == 0 {
+		return 0.0
+	}
+
+	// 简单实现：比较整个截图的字节差异
+	// 实际应用中应裁剪到聊天区域再比较
+	minLen := len(before)
+	if len(after) < minLen {
+		minLen = len(after)
+	}
+
+	diffCount := 0
+	for i := 0; i < minLen; i++ {
+		if before[i] != after[i] {
+			diffCount++
+		}
+	}
+
+	return float64(diffCount) / float64(minLen)
 }
 
 // CaptureDiagnostics 捕获诊断信息

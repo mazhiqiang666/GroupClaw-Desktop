@@ -412,41 +412,45 @@ func clickNode(bridge windows.BridgeInterface, handle uintptr, nodePath string) 
 		log.Fatalf("Failed to enumerate nodes: %s", result.Error)
 	}
 
-	// Flatten the node tree
-	flatNodes := flattenNodes(nodes, 0, *maxDepth)
+	// Build path map for hierarchical lookup
+	pathMap := make(map[string]*windows.AccessibleNode)
+	flatNodes := flattenNodesWithPath(nodes, nil, 0, *maxDepth, pathMap, "")
 
-	// Find the node by path or index
+	// Find the node by hierarchical path or index
 	var targetNode *windows.AccessibleNode
 	var nodeIndex int
+	var foundPath string
 
-	if strings.HasPrefix(nodePath, "[") && strings.HasSuffix(nodePath, "]") {
-		// Parse as index path like "[3]" or "[1].[2]"
+	// Check if path is in the format [0].[3].[2] (hierarchical)
+	if strings.Contains(nodePath, "].[") {
+		// Hierarchical path lookup
+		if node, ok := pathMap[nodePath]; ok {
+			targetNode = node
+			foundPath = nodePath
+		}
+	} else if strings.HasPrefix(nodePath, "[") && strings.HasSuffix(nodePath, "]") {
+		// Simple index path like "[3]"
 		indexStr := nodePath[1 : len(nodePath)-1]
-		if strings.Contains(indexStr, "].[") {
-			// Handle nested path like "[1].[2]"
-			parts := strings.Split(indexStr, "].[")
-			if len(parts) > 0 {
-				indexStr = parts[0]
-			}
-		}
 		index, err := strconv.Atoi(indexStr)
-		if err != nil || index < 0 || index >= len(flatNodes) {
-			log.Fatalf("Invalid node index: %s (valid range: 0-%d)", nodePath, len(flatNodes)-1)
+		if err == nil && index >= 0 && index < len(flatNodes) {
+			targetNode = &flatNodes[index]
+			nodeIndex = index
+			foundPath = fmt.Sprintf("[%d]", index)
 		}
-		targetNode = &flatNodes[index]
-		nodeIndex = index
 	} else {
 		// Try to parse as a simple index
 		index, err := strconv.Atoi(nodePath)
 		if err == nil && index >= 0 && index < len(flatNodes) {
 			targetNode = &flatNodes[index]
 			nodeIndex = index
+			foundPath = fmt.Sprintf("[%d]", index)
 		} else {
 			// Try to find by name
 			for i, node := range flatNodes {
 				if node.Name == nodePath {
 					targetNode = &node
 					nodeIndex = i
+					foundPath = fmt.Sprintf("[%d]", i)
 					break
 				}
 			}
@@ -483,6 +487,7 @@ func clickNode(bridge windows.BridgeInterface, handle uintptr, nodePath string) 
 			"success":         true,
 			"handle":          handle,
 			"node_index":      nodeIndex,
+			"node_path":       foundPath,
 			"node_name":       targetNode.Name,
 			"node_role":       targetNode.Role,
 			"node_bounds":     bounds,
@@ -496,7 +501,7 @@ func clickNode(bridge windows.BridgeInterface, handle uintptr, nodePath string) 
 	} else {
 		fmt.Printf("Node click completed:\n")
 		fmt.Printf("  Window: %d\n", handle)
-		fmt.Printf("  Node: [%d] %s (%s)\n", nodeIndex, targetNode.Name, targetNode.Role)
+		fmt.Printf("  Node: %s [%d] %s (%s)\n", foundPath, nodeIndex, targetNode.Name, targetNode.Role)
 		fmt.Printf("  Bounds: x=%d, y=%d, w=%d, h=%d\n", bounds[0], bounds[1], bounds[2], bounds[3])
 		fmt.Printf("  Click position: (%d, %d)\n", clickX, clickY)
 		fmt.Printf("  Screenshot captured: %v (size: %d bytes)\n", len(screenshot) > 0, len(screenshot))
@@ -514,6 +519,33 @@ func flattenNodes(nodes []windows.AccessibleNode, depth int, maxDepth int) []win
 		result = append(result, node)
 		if len(node.Children) > 0 {
 			result = append(result, flattenNodes(node.Children, depth+1, maxDepth)...)
+		}
+	}
+	return result
+}
+
+// flattenNodesWithPath recursively flattens AccessibleNode tree and builds path map
+func flattenNodesWithPath(nodes []windows.AccessibleNode, parent *windows.AccessibleNode, depth int, maxDepth int, pathMap map[string]*windows.AccessibleNode, parentPath string) []windows.AccessibleNode {
+	if depth >= maxDepth {
+		return nodes
+	}
+
+	result := make([]windows.AccessibleNode, 0, len(nodes))
+	for i, node := range nodes {
+		// Build hierarchical path
+		nodePath := parentPath
+		if nodePath == "" {
+			nodePath = fmt.Sprintf("[%d]", i)
+		} else {
+			nodePath = fmt.Sprintf("%s.[%d]", nodePath, i)
+		}
+
+		// Store in path map for hierarchical lookup
+		pathMap[nodePath] = &node
+
+		result = append(result, node)
+		if len(node.Children) > 0 {
+			result = append(result, flattenNodesWithPath(node.Children, &node, depth+1, maxDepth, pathMap, nodePath)...)
 		}
 	}
 	return result
