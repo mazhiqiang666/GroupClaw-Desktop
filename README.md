@@ -206,11 +206,107 @@ task test-gateway
 task test-all
 ```
 
-### 3. 测试联调 SOP
+### 3. 联调命令示例
+
+使用 `wechat-debug` 工具进行联调测试，支持 mock 和 real 两种模式：
+
+#### 3.1 wechat-debug 工具介绍
+
+`wechat-debug` 是 WeChat 调试和测试工具，支持以下功能：
+
+| 功能 | 命令 | 说明 |
+|------|------|------|
+| 查找窗口 | `find-window` | 查找 WeChat 窗口 |
+| 列出节点 | `list-nodes <handle>` | 列出可访问性节点 |
+| 扫描会话 | `scan` | 扫描会话列表 |
+| 聚焦会话 | `focus --contact <name>` | 切换到目标会话 |
+| 发送消息 | `send --contact <name> --message <content>` | 发送消息到会话 |
+| 验证消息 | `verify --contact <name> --message <content>` | 验证消息发送 |
+| 完整测试 | `full-test` | 运行完整测试流程 |
+| 运行链路 | `run-chain` | 运行完整链路：scan → focus → send → verify |
+
+#### 3.2 Mock 模式（无需真实 WeChat）
+
+使用 `--mock` 标志进行无真实 WeChat 的测试：
+
+```bash
+# 运行完整链路测试（mock 模式）
+wechat-debug run-chain --contact "张三" --message "Test message" --mock
+
+# 输出 JSON 格式
+wechat-debug run-chain --contact "张三" --message "Test message" --mock --json
+
+# 单独测试各步骤（mock 模式）
+wechat-debug scan --mock
+wechat-debug focus --contact "张三" --mock
+wechat-debug send --contact "张三" --message "Hello" --mock
+wechat-debug verify --contact "张三" --message "Hello" --mock
+```
+
+**Mock 模式特点：**
+- ✅ 无需真实 WeChat 应用
+- ✅ 使用 `StateChangingMockBridge` 模拟节点状态变化
+- ✅ 适合单元测试和 CI/CD 环境
+- ✅ 返回标准化诊断信息
+
+#### 3.3 Real 模式（需要真实 WeChat）
+
+使用真实 WeChat 应用进行测试：
+
+```bash
+# 确保 WeChat 正在运行
+# 然后运行完整链路测试（real 模式）
+wechat-debug run-chain --contact "张三" --message "Test message"
+
+# 输出 JSON 格式
+wechat-debug run-chain --contact "张三" --message "Test message" --json
+
+# 单独测试各步骤（real 模式）
+wechat-debug find-window
+wechat-debug scan
+wechat-debug focus --contact "张三"
+wechat-debug send --contact "张三" --message "Hello"
+wechat-debug verify --contact "张三" --message "Hello"
+```
+
+**Real 模式特点：**
+- ✅ 使用真实 WeChat 应用
+- ✅ 使用 Windows Bridge 与 IAccessible 接口交互
+- ✅ 适合集成测试和端到端测试
+- ✅ 需要 WeChat 应用正在运行
+
+#### 3.4 诊断输出示例
+
+两种模式输出相同的诊断格式：
+
+```json
+{
+  "step": "run-chain",
+  "status": "success",
+  "confidence": 0.85,
+  "diagnostics": [
+    {
+      "timestamp": "2026-03-23T10:00:00Z",
+      "level": "info",
+      "message": "Chain completed",
+      "context": {
+        "detect_status": "success",
+        "scan_status": "success",
+        "focus_status": "success",
+        "send_status": "success",
+        "verify_status": "success",
+        "conversations_found": "2"
+      }
+    }
+  ]
+}
+```
+
+### 3.5 测试联调 SOP
 
 遵循以下顺序进行测试联调，确保最小闭环验证：
 
-#### 3.1 规则级测试（第一步）
+#### 3.5.1 规则级测试（第一步）
 
 验证所有规则逻辑的正确性：
 
@@ -235,7 +331,7 @@ make test-rules
 - ✅ confidence 置信度格式正确（2位小数）
 - ✅ delivery_state 状态流转正确
 
-#### 3.2 适配器流程测试（第二步）
+#### 3.5.2 适配器流程测试（第二步）
 
 验证基本流程的正确性：
 
@@ -255,7 +351,7 @@ make test-adapter
 - ✅ Mock bridge 行为符合预期
 - ✅ 返回结果状态正确
 
-#### 3.3 最小闭环诊断测试（第三步）
+#### 3.5.3 最小闭环诊断测试（第三步）
 
 验证完整链路和诊断信息一致性：
 
@@ -279,7 +375,7 @@ go test -v ./internal/agent/adapter/wechat -run "TestDiagnosticFlow" -timeout 30
 - ✅ 状态变化 mock 行为符合预期
 - ✅ 诊断字段格式正确（confidence 2位小数）
 
-#### 3.4 执行顺序总结
+#### 3.5.4 执行顺序总结
 
 ```bash
 # 1. 规则级测试
@@ -291,6 +387,9 @@ make test-adapter
 # 3. 最小闭环诊断测试
 go test -v ./internal/agent/adapter/wechat -run "TestDiagnosticFlow" -timeout 30s
 
+# 4. Mock 模式联调测试
+wechat-debug run-chain --contact "张三" --message "Test message" --mock --json
+
 # 或者运行所有 WeChat 适配器测试
 make test-all
 ```
@@ -299,6 +398,7 @@ make test-all
 - 先运行 `test-rules` 确保规则逻辑正确
 - 再运行 `test-adapter` 确保流程调用正确
 - 最后运行最小闭环测试验证完整链路
+- 使用 `wechat-debug --mock` 进行无真实 WeChat 的联调测试
 - 如果任何一步失败，先修复失败的测试再继续
 
 ### 3. 运行 Mock Chat App
@@ -388,6 +488,18 @@ go build ./...
 - ✅ 添加任务状态机说明
 - ✅ 添加端到端测试说明
 - ✅ 完善协议说明文档
+
+#### Step 8: wechat-debug 调试工具
+- ✅ 提取统一执行器 (UnifiedExecutor)
+- ✅ 添加 mock 模式支持 (`--mock` 标志)
+- ✅ 标准化 JSON 输出格式
+- ✅ 支持完整链路测试 (scan → focus → send → verify)
+
+#### Step 9: Mock/Real 对齐
+- ✅ 创建导出的 mock bridge 实现 (`mock_bridge.go`)
+- ✅ 更新桥接对齐文档 (`开发日志/06-bridge-alignment.md`)
+- ✅ 添加联调命令示例到 README
+- ✅ 验证 mock 和 real 模式诊断输出一致
 
 ## 任务状态机
 

@@ -14,10 +14,126 @@ import (
 )
 
 var (
-	jsonOutput = flag.Bool("json", false, "Output as JSON")
-	contactName = flag.String("contact", "", "Contact name to focus/send to")
+	jsonOutput    = flag.Bool("json", false, "Output as JSON")
+	contactName   = flag.String("contact", "", "Contact name to focus/send to")
 	messageContent = flag.String("message", "Test message from debugging script", "Message content to send")
+	mockMode      = flag.Bool("mock", false, "Use mock bridge for testing")
 )
+
+// UnifiedExecutor provides common operations for WeChat debugging
+type UnifiedExecutor struct {
+	adapter *wechat.WeChatAdapter
+}
+
+// NewUnifiedExecutor creates a new executor with optional mock mode
+func NewUnifiedExecutor(useMock bool) *UnifiedExecutor {
+	var adapter *wechat.WeChatAdapter
+	if useMock {
+		// Create mock bridge for testing
+		mockBridge := wechat.NewStateChangingMockBridge()
+		mockBridge.SetFindResult([]uintptr{12345})
+		adapter = wechat.NewWeChatAdapterWithBridge(mockBridge)
+	} else {
+		adapter = wechat.NewWeChatAdapter()
+	}
+
+	return &UnifiedExecutor{
+		adapter: adapter,
+	}
+}
+
+// Init initializes the adapter
+func (e *UnifiedExecutor) Init() adapter.Result {
+	result := e.adapter.Init(adapter.Config{})
+	if result.Status != adapter.StatusSuccess {
+		return result
+	}
+	return adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+	}
+}
+
+// Destroy cleans up resources
+func (e *UnifiedExecutor) Destroy() {
+	e.adapter.Destroy()
+}
+
+// RunDetect detects WeChat instances
+func (e *UnifiedExecutor) RunDetect() ([]protocol.AppInstanceRef, adapter.Result, error) {
+	instances, result := e.adapter.Detect()
+	if result.Status != adapter.StatusSuccess {
+		return nil, result, fmt.Errorf("failed to detect WeChat: %s", result.Error)
+	}
+	return instances, result, nil
+}
+
+// RunScan scans conversations for a given instance
+func (e *UnifiedExecutor) RunScan(instance protocol.AppInstanceRef) ([]protocol.ConversationRef, adapter.Result, error) {
+	conversations, result := e.adapter.Scan(instance)
+	if result.Status != adapter.StatusSuccess {
+		return nil, result, fmt.Errorf("failed to scan: %s", result.Error)
+	}
+	return conversations, result, nil
+}
+
+// SelectConversation finds a conversation by name
+func (e *UnifiedExecutor) SelectConversation(conversations []protocol.ConversationRef, name string) (*protocol.ConversationRef, error) {
+	for i := range conversations {
+		if conversations[i].DisplayName == name {
+			return &conversations[i], nil
+		}
+	}
+	return nil, fmt.Errorf("contact '%s' not found in conversation list", name)
+}
+
+// RunFocus focuses on a conversation
+func (e *UnifiedExecutor) RunFocus(conv protocol.ConversationRef) adapter.Result {
+	return e.adapter.Focus(conv)
+}
+
+// RunSend sends a message to a conversation
+func (e *UnifiedExecutor) RunSend(conv protocol.ConversationRef, content string, taskID string) adapter.Result {
+	return e.adapter.Send(conv, content, taskID)
+}
+
+// RunVerify verifies message delivery
+func (e *UnifiedExecutor) RunVerify(conv protocol.ConversationRef, content string, timeout time.Duration) (*protocol.MessageObs, adapter.Result) {
+	return e.adapter.Verify(conv, content, timeout)
+}
+
+// PrintDiagnostics prints diagnostics in a standardized format
+func (e *UnifiedExecutor) PrintDiagnostics(step string, result adapter.Result) {
+	fmt.Printf("%s Diagnostics:\n", step)
+	for _, diag := range result.Diagnostics {
+		for k, v := range diag.Context {
+			fmt.Printf("  %s: %s\n", k, v)
+		}
+	}
+}
+
+// JSONOutput represents standardized JSON output structure
+type JSONOutput struct {
+	Step         string                  `json:"step"`
+	Status       string                  `json:"status"`
+	Confidence   float64                 `json:"confidence"`
+	Diagnostics  []adapter.Diagnostic    `json:"diagnostics,omitempty"`
+	Instances    []protocol.AppInstanceRef `json:"instances,omitempty"`
+	Conversations []protocol.ConversationRef `json:"conversations,omitempty"`
+	Conversation *protocol.ConversationRef  `json:"conversation,omitempty"`
+	Message      *protocol.MessageObs    `json:"message,omitempty"`
+	Error        string                  `json:"error,omitempty"`
+}
+
+// PrintJSON prints standardized JSON output
+func (e *UnifiedExecutor) PrintJSON(output JSONOutput) {
+	jsonData, err := json.MarshalIndent(output, "", "  ")
+	if err != nil {
+		log.Printf("Failed to marshal JSON: %v", err)
+		return
+	}
+	fmt.Println(string(jsonData))
+}
 
 func main() {
 	flag.Parse()
@@ -30,19 +146,19 @@ func main() {
 
 	command := args[0]
 
-	// 创建 WeChat 适配器
-	wechatAdapter := wechat.NewWeChatAdapter()
+	// Create executor with mock mode if specified
+	executor := NewUnifiedExecutor(*mockMode)
 
-	// 初始化适配器
-	result := wechatAdapter.Init(adapter.Config{})
+	// Initialize adapter
+	result := executor.Init()
 	if result.Status != adapter.StatusSuccess {
 		log.Fatalf("Failed to initialize adapter: %s", result.Error)
 	}
-	defer wechatAdapter.Destroy()
+	defer executor.Destroy()
 
 	switch command {
 	case "find-window":
-		findWeChatWindow(wechatAdapter)
+		findWeChatWindow(executor)
 	case "list-nodes":
 		if len(args) < 2 {
 			log.Fatal("Usage: wechat-debug list-nodes <window-handle>")
@@ -51,28 +167,28 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid window handle: %v", err)
 		}
-		listNodes(wechatAdapter, uintptr(handle))
+		listNodes(executor, uintptr(handle))
 	case "scan":
-		scanConversations(wechatAdapter)
+		scanConversations(executor)
 	case "focus":
 		if *contactName == "" {
 			log.Fatal("Usage: wechat-debug focus --contact <name>")
 		}
-		focusContact(wechatAdapter, *contactName)
+		focusContact(executor, *contactName)
 	case "send":
 		if *contactName == "" {
 			log.Fatal("Usage: wechat-debug send --contact <name> [--message <content>]")
 		}
-		sendMessage(wechatAdapter, *contactName, *messageContent)
+		sendMessage(executor, *contactName, *messageContent)
 	case "verify":
 		if *contactName == "" {
 			log.Fatal("Usage: wechat-debug verify --contact <name> [--message <content>]")
 		}
-		verifyMessage(wechatAdapter, *contactName, *messageContent)
+		verifyMessage(executor, *contactName, *messageContent)
 	case "full-test":
-		fullTestFlow(wechatAdapter)
+		fullTestFlow(executor)
 	case "run-chain":
-		runChain(wechatAdapter)
+		runChain(executor)
 	default:
 		printUsage()
 	}
@@ -93,6 +209,7 @@ func printUsage() {
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                                - Output as JSON")
+	fmt.Println("  --mock                                - Use mock bridge for testing")
 	fmt.Println("  --contact <name>                      - Contact name for focus/send/verify")
 	fmt.Println("  --message <content>                   - Message content to send/verify")
 	fmt.Println("")
@@ -103,28 +220,24 @@ func printUsage() {
 	fmt.Println("  wechat-debug focus --contact \"张三\"")
 	fmt.Println("  wechat-debug send --contact \"张三\" --message \"Hello from debug script\"")
 	fmt.Println("  wechat-debug verify --contact \"张三\" --message \"Hello from debug script\"")
-	fmt.Println("  wechat-debug full-test")
-	fmt.Println("  wechat-debug run-chain --contact \"张三\" --message \"Test message\"")
+	fmt.Println("  wechat-debug full-test --mock")
+	fmt.Println("  wechat-debug run-chain --contact \"张三\" --message \"Test message\" --mock")
 }
 
-func findWeChatWindow(wechatAdapter *wechat.WeChatAdapter) {
-	instances, result := wechatAdapter.Detect()
-	if result.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to detect WeChat: %s", result.Error)
-	}
-
-	if len(instances) == 0 {
-		fmt.Println("No WeChat windows found")
-		return
+func findWeChatWindow(executor *UnifiedExecutor) {
+	instances, result, err := executor.RunDetect()
+	if err != nil {
+		log.Fatalf("Failed to detect WeChat: %s", err)
 	}
 
 	if *jsonOutput {
-		data := map[string]interface{}{
-			"instances": instances,
-			"count":     len(instances),
+		output := JSONOutput{
+			Step:       "find-window",
+			Status:     string(result.Status),
+			Confidence: result.Confidence,
+			Instances:  instances,
 		}
-		jsonData, _ := json.MarshalIndent(data, "", "  ")
-		fmt.Println(string(jsonData))
+		executor.PrintJSON(output)
 	} else {
 		fmt.Printf("Found %d WeChat instance(s):\n", len(instances))
 		for i, inst := range instances {
@@ -133,28 +246,26 @@ func findWeChatWindow(wechatAdapter *wechat.WeChatAdapter) {
 	}
 }
 
-func listNodes(wechatAdapter *wechat.WeChatAdapter, windowHandle uintptr) {
-	// Note: This requires access to the bridge, which is internal
-	// For now, we'll use the adapter's Scan method to get node info
-	instances, result := wechatAdapter.Detect()
-	if result.Status != adapter.StatusSuccess || len(instances) == 0 {
+func listNodes(executor *UnifiedExecutor, windowHandle uintptr) {
+	instances, _, err := executor.RunDetect()
+	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
 	}
 
-	// Use scan to get node information
-	conversations, scanResult := wechatAdapter.Scan(instances[0])
-	if scanResult.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	conversations, scanResult, err := executor.RunScan(instances[0])
+	if err != nil {
+		log.Fatalf("Failed to scan: %s", err)
 	}
 
 	if *jsonOutput {
-		data := map[string]interface{}{
-			"window_handle":   windowHandle,
-			"conversations":   conversations,
-			"conversation_count": len(conversations),
+		output := JSONOutput{
+			Step:          "list-nodes",
+			Status:        string(scanResult.Status),
+			Confidence:    scanResult.Confidence,
+			Conversations: conversations,
+			Diagnostics:   scanResult.Diagnostics,
 		}
-		jsonData, _ := json.MarshalIndent(data, "", "  ")
-		fmt.Println(string(jsonData))
+		executor.PrintJSON(output)
 	} else {
 		fmt.Printf("Found %d conversation(s):\n", len(conversations))
 		for i, conv := range conversations {
@@ -166,25 +277,26 @@ func listNodes(wechatAdapter *wechat.WeChatAdapter, windowHandle uintptr) {
 	}
 }
 
-func scanConversations(wechatAdapter *wechat.WeChatAdapter) {
-	instances, result := wechatAdapter.Detect()
-	if result.Status != adapter.StatusSuccess || len(instances) == 0 {
+func scanConversations(executor *UnifiedExecutor) {
+	instances, _, err := executor.RunDetect()
+	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
 	}
 
-	conversations, scanResult := wechatAdapter.Scan(instances[0])
-	if scanResult.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	conversations, scanResult, err := executor.RunScan(instances[0])
+	if err != nil {
+		log.Fatalf("Failed to scan: %s", err)
 	}
 
 	if *jsonOutput {
-		data := map[string]interface{}{
-			"conversations":   conversations,
-			"conversation_count": len(conversations),
-			"diagnostics":     scanResult.Diagnostics,
+		output := JSONOutput{
+			Step:          "scan",
+			Status:        string(scanResult.Status),
+			Confidence:    scanResult.Confidence,
+			Conversations: conversations,
+			Diagnostics:   scanResult.Diagnostics,
 		}
-		jsonData, _ := json.MarshalIndent(data, "", "  ")
-		fmt.Println(string(jsonData))
+		executor.PrintJSON(output)
 	} else {
 		fmt.Printf("Scan completed:\n")
 		fmt.Printf("  Conversations found: %d\n", len(conversations))
@@ -192,94 +304,67 @@ func scanConversations(wechatAdapter *wechat.WeChatAdapter) {
 			fmt.Printf("  [%d] %s (position: %d)\n", i+1, conv.DisplayName, conv.ListPosition)
 		}
 		fmt.Printf("\nDiagnostics:\n")
-		for _, diag := range scanResult.Diagnostics {
-			fmt.Printf("  %s: %s\n", diag.Level, diag.Message)
-			for k, v := range diag.Context {
-				fmt.Printf("    %s: %s\n", k, v)
-			}
-		}
+		executor.PrintDiagnostics("Scan", scanResult)
 	}
 }
 
-func focusContact(wechatAdapter *wechat.WeChatAdapter, contactName string) {
-	instances, result := wechatAdapter.Detect()
-	if result.Status != adapter.StatusSuccess || len(instances) == 0 {
+func focusContact(executor *UnifiedExecutor, contactName string) {
+	instances, _, err := executor.RunDetect()
+	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
 	}
 
-	conversations, scanResult := wechatAdapter.Scan(instances[0])
-	if scanResult.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	conversations, _, err := executor.RunScan(instances[0])
+	if err != nil {
+		log.Fatalf("Failed to scan: %s", err)
 	}
 
-	// Find the contact
-	var targetConv *protocol.ConversationRef
-	for i := range conversations {
-		if conversations[i].DisplayName == contactName {
-			targetConv = &conversations[i]
-			break
-		}
-	}
-
-	if targetConv == nil {
-		log.Fatalf("Contact '%s' not found in conversation list", contactName)
+	targetConv, err := executor.SelectConversation(conversations, contactName)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	fmt.Printf("Focusing on contact: %s\n", contactName)
 
-	focusResult := wechatAdapter.Focus(*targetConv)
+	focusResult := executor.RunFocus(*targetConv)
 
 	if *jsonOutput {
-		data := map[string]interface{}{
-			"contact":    contactName,
-			"success":    focusResult.Status == adapter.StatusSuccess,
-			"confidence": focusResult.Confidence,
-			"diagnostics": focusResult.Diagnostics,
+		output := JSONOutput{
+			Step:         "focus",
+			Status:       string(focusResult.Status),
+			Confidence:   focusResult.Confidence,
+			Conversation: targetConv,
+			Diagnostics:  focusResult.Diagnostics,
 		}
-		jsonData, _ := json.MarshalIndent(data, "", "  ")
-		fmt.Println(string(jsonData))
+		executor.PrintJSON(output)
 	} else {
 		fmt.Printf("Focus result:\n")
 		fmt.Printf("  Status: %s\n", focusResult.Status)
 		fmt.Printf("  Confidence: %.2f\n", focusResult.Confidence)
-		fmt.Printf("  Diagnostics:\n")
-		for _, diag := range focusResult.Diagnostics {
-			fmt.Printf("    %s: %s\n", diag.Level, diag.Message)
-			for k, v := range diag.Context {
-				fmt.Printf("      %s: %s\n", k, v)
-			}
-		}
+		executor.PrintDiagnostics("Focus", focusResult)
 	}
 }
 
-func sendMessage(wechatAdapter *wechat.WeChatAdapter, contactName string, message string) {
-	instances, result := wechatAdapter.Detect()
-	if result.Status != adapter.StatusSuccess || len(instances) == 0 {
+func sendMessage(executor *UnifiedExecutor, contactName string, message string) {
+	instances, _, err := executor.RunDetect()
+	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
 	}
 
-	conversations, scanResult := wechatAdapter.Scan(instances[0])
-	if scanResult.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	conversations, _, err := executor.RunScan(instances[0])
+	if err != nil {
+		log.Fatalf("Failed to scan: %s", err)
 	}
 
-	// Find the contact
-	var targetConv *protocol.ConversationRef
-	for i := range conversations {
-		if conversations[i].DisplayName == contactName {
-			targetConv = &conversations[i]
-			break
-		}
-	}
-
-	if targetConv == nil {
-		log.Fatalf("Contact '%s' not found in conversation list", contactName)
+	targetConv, err := executor.SelectConversation(conversations, contactName)
+	if err != nil {
+		log.Fatal(err)
 	}
 
 	fmt.Printf("Sending message to %s: %s\n", contactName, message)
 
 	// First focus on the contact
-	focusResult := wechatAdapter.Focus(*targetConv)
+	focusResult := executor.RunFocus(*targetConv)
 	if focusResult.Status != adapter.StatusSuccess {
 		log.Fatalf("Failed to focus on contact: %s", focusResult.Error)
 	}
@@ -288,40 +373,72 @@ func sendMessage(wechatAdapter *wechat.WeChatAdapter, contactName string, messag
 	time.Sleep(200 * time.Millisecond)
 
 	// Send the message
-	sendResult := wechatAdapter.Send(*targetConv, message, "debug-script")
+	sendResult := executor.RunSend(*targetConv, message, "debug-script")
 
 	if *jsonOutput {
-		data := map[string]interface{}{
-			"contact":        contactName,
-			"message":        message,
-			"send_success":   sendResult.Status == adapter.StatusSuccess,
-			"confidence":     sendResult.Confidence,
-			"send_diagnostics": sendResult.Diagnostics,
+		output := JSONOutput{
+			Step:         "send",
+			Status:       string(sendResult.Status),
+			Confidence:   sendResult.Confidence,
+			Conversation: targetConv,
+			Diagnostics:  sendResult.Diagnostics,
 		}
-		jsonData, _ := json.MarshalIndent(data, "", "  ")
-		fmt.Println(string(jsonData))
+		executor.PrintJSON(output)
 	} else {
 		fmt.Printf("Send result:\n")
 		fmt.Printf("  Status: %s\n", sendResult.Status)
 		fmt.Printf("  Confidence: %.2f\n", sendResult.Confidence)
-		fmt.Printf("  Diagnostics:\n")
-		for _, diag := range sendResult.Diagnostics {
-			fmt.Printf("    %s: %s\n", diag.Level, diag.Message)
-			for k, v := range diag.Context {
-				fmt.Printf("      %s: %s\n", k, v)
-			}
-		}
+		executor.PrintDiagnostics("Send", sendResult)
 	}
 }
 
-func fullTestFlow(wechatAdapter *wechat.WeChatAdapter) {
+func verifyMessage(executor *UnifiedExecutor, contactName string, message string) {
+	instances, _, err := executor.RunDetect()
+	if err != nil || len(instances) == 0 {
+		log.Fatal("No WeChat window found")
+	}
+
+	conversations, _, err := executor.RunScan(instances[0])
+	if err != nil {
+		log.Fatalf("Failed to scan: %s", err)
+	}
+
+	targetConv, err := executor.SelectConversation(conversations, contactName)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("Verifying message delivery for %s: %s\n", contactName, message)
+
+	// Verify the message
+	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, message, 5*time.Second)
+
+	if *jsonOutput {
+		output := JSONOutput{
+			Step:         "verify",
+			Status:       string(verifyAdapterResult.Status),
+			Confidence:   verifyAdapterResult.Confidence,
+			Conversation: targetConv,
+			Message:      verifyResult,
+			Diagnostics:  verifyAdapterResult.Diagnostics,
+		}
+		executor.PrintJSON(output)
+	} else {
+		fmt.Printf("Verify result:\n")
+		fmt.Printf("  Status: %s\n", verifyAdapterResult.Status)
+		fmt.Printf("  Confidence: %.2f\n", verifyAdapterResult.Confidence)
+		executor.PrintDiagnostics("Verify", verifyAdapterResult)
+	}
+}
+
+func fullTestFlow(executor *UnifiedExecutor) {
 	fmt.Println("=== WeChat Debugging Full Test Flow ===")
 	fmt.Println()
 
 	// Step 1: Find WeChat window
 	fmt.Println("Step 1: Finding WeChat window...")
-	instances, result := wechatAdapter.Detect()
-	if result.Status != adapter.StatusSuccess || len(instances) == 0 {
+	instances, detectResult, err := executor.RunDetect()
+	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
 	}
 	fmt.Printf("  Found WeChat instance: %s\n", instances[0].InstanceID)
@@ -329,9 +446,9 @@ func fullTestFlow(wechatAdapter *wechat.WeChatAdapter) {
 
 	// Step 2: Scan conversations
 	fmt.Println("Step 2: Scanning conversation list...")
-	conversations, scanResult := wechatAdapter.Scan(instances[0])
-	if scanResult.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	conversations, scanResult, err := executor.RunScan(instances[0])
+	if err != nil {
+		log.Fatalf("Failed to scan: %s", err)
 	}
 	fmt.Printf("  Found %d conversations\n", len(conversations))
 	for i, conv := range conversations {
@@ -342,14 +459,9 @@ func fullTestFlow(wechatAdapter *wechat.WeChatAdapter) {
 	// Step 3: Focus on first contact (or specified contact)
 	var targetConv *protocol.ConversationRef
 	if *contactName != "" {
-		for i := range conversations {
-			if conversations[i].DisplayName == *contactName {
-				targetConv = &conversations[i]
-				break
-			}
-		}
-		if targetConv == nil {
-			log.Fatalf("Contact '%s' not found", *contactName)
+		targetConv, err = executor.SelectConversation(conversations, *contactName)
+		if err != nil {
+			log.Fatal(err)
 		}
 	} else if len(conversations) > 0 {
 		targetConv = &conversations[0]
@@ -358,40 +470,25 @@ func fullTestFlow(wechatAdapter *wechat.WeChatAdapter) {
 	}
 
 	fmt.Printf("Step 3: Focusing on contact: %s\n", targetConv.DisplayName)
-	focusResult := wechatAdapter.Focus(*targetConv)
+	focusResult := executor.RunFocus(*targetConv)
 	fmt.Printf("  Focus confidence: %.2f\n", focusResult.Confidence)
-	fmt.Printf("  Focus diagnostics:\n")
-	for _, diag := range focusResult.Diagnostics {
-		for k, v := range diag.Context {
-			fmt.Printf("    %s: %s\n", k, v)
-		}
-	}
+	executor.PrintDiagnostics("Focus", focusResult)
 	fmt.Println()
 
 	// Step 4: Send test message
 	fmt.Println("Step 4: Sending test message...")
 	time.Sleep(200 * time.Millisecond)
-	sendResult := wechatAdapter.Send(*targetConv, *messageContent, "debug-full-test")
+	sendResult := executor.RunSend(*targetConv, *messageContent, "debug-full-test")
 	fmt.Printf("  Send confidence: %.2f\n", sendResult.Confidence)
-	fmt.Printf("  Send diagnostics:\n")
-	for _, diag := range sendResult.Diagnostics {
-		for k, v := range diag.Context {
-			fmt.Printf("    %s: %s\n", k, v)
-		}
-	}
+	executor.PrintDiagnostics("Send", sendResult)
 	fmt.Println()
 
 	// Step 5: Verify message
 	fmt.Println("Step 5: Verifying message delivery...")
-	verifyResult, verifyAdapterResult := wechatAdapter.Verify(*targetConv, *messageContent, 5*time.Second)
+	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, *messageContent, 5*time.Second)
 	if verifyAdapterResult.Status == adapter.StatusSuccess {
 		fmt.Printf("  Verify confidence: %.2f\n", verifyAdapterResult.Confidence)
-		fmt.Printf("  Verify diagnostics:\n")
-		for _, diag := range verifyAdapterResult.Diagnostics {
-			for k, v := range diag.Context {
-				fmt.Printf("    %s: %s\n", k, v)
-			}
-		}
+		executor.PrintDiagnostics("Verify", verifyAdapterResult)
 	} else {
 		fmt.Printf("  Verify failed: %s\n", verifyAdapterResult.Error)
 	}
@@ -399,70 +496,41 @@ func fullTestFlow(wechatAdapter *wechat.WeChatAdapter) {
 
 	fmt.Println()
 	fmt.Println("=== Test Flow Complete ===")
-}
 
-func verifyMessage(wechatAdapter *wechat.WeChatAdapter, contactName string, message string) {
-	instances, result := wechatAdapter.Detect()
-	if result.Status != adapter.StatusSuccess || len(instances) == 0 {
-		log.Fatal("No WeChat window found")
-	}
-
-	conversations, scanResult := wechatAdapter.Scan(instances[0])
-	if scanResult.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to scan: %s", scanResult.Error)
-	}
-
-	// Find the contact
-	var targetConv *protocol.ConversationRef
-	for i := range conversations {
-		if conversations[i].DisplayName == contactName {
-			targetConv = &conversations[i]
-			break
-		}
-	}
-
-	if targetConv == nil {
-		log.Fatalf("Contact '%s' not found in conversation list", contactName)
-	}
-
-	fmt.Printf("Verifying message delivery for %s: %s\n", contactName, message)
-
-	// Verify the message
-	verifyResult, verifyAdapterResult := wechatAdapter.Verify(*targetConv, message, 5*time.Second)
-
+	// Print standardized JSON output if requested
 	if *jsonOutput {
-		data := map[string]interface{}{
-			"contact":     contactName,
-			"message":     message,
-			"success":     verifyAdapterResult.Status == adapter.StatusSuccess,
-			"confidence":  verifyAdapterResult.Confidence,
-			"diagnostics": verifyAdapterResult.Diagnostics,
+		output := JSONOutput{
+			Step:       "full-test",
+			Status:     string(verifyAdapterResult.Status),
+			Confidence: verifyAdapterResult.Confidence,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Full test flow completed",
+					Context: map[string]string{
+						"detect_status":   string(detectResult.Status),
+						"scan_status":     string(scanResult.Status),
+						"focus_status":    string(focusResult.Status),
+						"send_status":     string(sendResult.Status),
+						"verify_status":   string(verifyAdapterResult.Status),
+						"conversations_found": strconv.Itoa(len(conversations)),
+					},
+				},
+			},
 		}
-		jsonData, _ := json.MarshalIndent(data, "", "  ")
-		fmt.Println(string(jsonData))
-	} else {
-		fmt.Printf("Verify result:\n")
-		fmt.Printf("  Status: %s\n", verifyAdapterResult.Status)
-		fmt.Printf("  Confidence: %.2f\n", verifyAdapterResult.Confidence)
-		fmt.Printf("  Diagnostics:\n")
-		for _, diag := range verifyAdapterResult.Diagnostics {
-			fmt.Printf("    %s: %s\n", diag.Level, diag.Message)
-			for k, v := range diag.Context {
-				fmt.Printf("      %s: %s\n", k, v)
-			}
-		}
+		executor.PrintJSON(output)
 	}
-	_ = verifyResult // Keep for future use
 }
 
-func runChain(wechatAdapter *wechat.WeChatAdapter) {
+func runChain(executor *UnifiedExecutor) {
 	fmt.Println("=== Running Complete Chain: Scan -> Focus -> Send -> Verify ===")
 	fmt.Println()
 
 	// Step 1: Detect WeChat instance
 	fmt.Println("Step 1: Detecting WeChat instance...")
-	instances, detectResult := wechatAdapter.Detect()
-	if detectResult.Status != adapter.StatusSuccess || len(instances) == 0 {
+	instances, detectResult, err := executor.RunDetect()
+	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
 	}
 	fmt.Printf("  Found WeChat instance: %s\n", instances[0].InstanceID)
@@ -470,33 +538,24 @@ func runChain(wechatAdapter *wechat.WeChatAdapter) {
 
 	// Step 2: Scan conversations
 	fmt.Println("Step 2: Scanning conversation list...")
-	conversations, scanResult := wechatAdapter.Scan(instances[0])
-	if scanResult.Status != adapter.StatusSuccess {
-		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	conversations, scanResult, err := executor.RunScan(instances[0])
+	if err != nil {
+		log.Fatalf("Failed to scan: %s", err)
 	}
 	fmt.Printf("  Found %d conversations\n", len(conversations))
 	for i, conv := range conversations {
 		fmt.Printf("    [%d] %s (position: %d)\n", i+1, conv.DisplayName, conv.ListPosition)
 	}
 	fmt.Printf("\n  Scan Diagnostics:\n")
-	for _, diag := range scanResult.Diagnostics {
-		for k, v := range diag.Context {
-			fmt.Printf("    %s: %s\n", k, v)
-		}
-	}
+	executor.PrintDiagnostics("Scan", scanResult)
 	fmt.Println()
 
 	// Step 3: Find and focus on target contact
 	var targetConv *protocol.ConversationRef
 	if *contactName != "" {
-		for i := range conversations {
-			if conversations[i].DisplayName == *contactName {
-				targetConv = &conversations[i]
-				break
-			}
-		}
-		if targetConv == nil {
-			log.Fatalf("Contact '%s' not found", *contactName)
+		targetConv, err = executor.SelectConversation(conversations, *contactName)
+		if err != nil {
+			log.Fatal(err)
 		}
 	} else if len(conversations) > 0 {
 		targetConv = &conversations[0]
@@ -505,40 +564,28 @@ func runChain(wechatAdapter *wechat.WeChatAdapter) {
 	}
 
 	fmt.Printf("Step 3: Focusing on contact: %s\n", targetConv.DisplayName)
-	focusResult := wechatAdapter.Focus(*targetConv)
+	focusResult := executor.RunFocus(*targetConv)
 	fmt.Printf("  Focus confidence: %.2f\n", focusResult.Confidence)
 	fmt.Printf("  Focus Diagnostics:\n")
-	for _, diag := range focusResult.Diagnostics {
-		for k, v := range diag.Context {
-			fmt.Printf("    %s: %s\n", k, v)
-		}
-	}
+	executor.PrintDiagnostics("Focus", focusResult)
 	fmt.Println()
 
 	// Step 4: Send message
 	fmt.Println("Step 4: Sending message...")
 	time.Sleep(200 * time.Millisecond)
-	sendResult := wechatAdapter.Send(*targetConv, *messageContent, "debug-chain")
+	sendResult := executor.RunSend(*targetConv, *messageContent, "debug-chain")
 	fmt.Printf("  Send confidence: %.2f\n", sendResult.Confidence)
 	fmt.Printf("  Send Diagnostics:\n")
-	for _, diag := range sendResult.Diagnostics {
-		for k, v := range diag.Context {
-			fmt.Printf("    %s: %s\n", k, v)
-		}
-	}
+	executor.PrintDiagnostics("Send", sendResult)
 	fmt.Println()
 
 	// Step 5: Verify message delivery
 	fmt.Println("Step 5: Verifying message delivery...")
-	verifyResult, verifyAdapterResult := wechatAdapter.Verify(*targetConv, *messageContent, 5*time.Second)
+	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, *messageContent, 5*time.Second)
 	if verifyAdapterResult.Status == adapter.StatusSuccess {
 		fmt.Printf("  Verify confidence: %.2f\n", verifyAdapterResult.Confidence)
 		fmt.Printf("  Verify Diagnostics:\n")
-		for _, diag := range verifyAdapterResult.Diagnostics {
-			for k, v := range diag.Context {
-				fmt.Printf("    %s: %s\n", k, v)
-			}
-		}
+		executor.PrintDiagnostics("Verify", verifyAdapterResult)
 	} else {
 		fmt.Printf("  Verify failed: %s\n", verifyAdapterResult.Error)
 	}
@@ -546,4 +593,29 @@ func runChain(wechatAdapter *wechat.WeChatAdapter) {
 
 	fmt.Println()
 	fmt.Println("=== Chain Complete ===")
+
+	// Print standardized JSON output if requested
+	if *jsonOutput {
+		output := JSONOutput{
+			Step:       "run-chain",
+			Status:     string(verifyAdapterResult.Status),
+			Confidence: verifyAdapterResult.Confidence,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Chain completed",
+					Context: map[string]string{
+						"detect_status":   string(detectResult.Status),
+						"scan_status":     string(scanResult.Status),
+						"focus_status":    string(focusResult.Status),
+						"send_status":     string(sendResult.Status),
+						"verify_status":   string(verifyAdapterResult.Status),
+						"conversations_found": strconv.Itoa(len(conversations)),
+					},
+				},
+			},
+		}
+		executor.PrintJSON(output)
+	}
 }

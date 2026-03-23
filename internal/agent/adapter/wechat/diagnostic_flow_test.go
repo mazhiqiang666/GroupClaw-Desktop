@@ -39,15 +39,6 @@ type stateChangingMockBridge struct {
 	afterScreenshot  []byte
 }
 
-// sendStateType tracks the progress of send operation
-type sendStateType int
-
-const (
-	sendStateNone sendStateType = iota
-	sendStatePasteCalled
-	sendStateEnterCalled
-)
-
 func newStateChangingMockBridge() *stateChangingMockBridge {
 	return &stateChangingMockBridge{
 		findError: adapter.Result{
