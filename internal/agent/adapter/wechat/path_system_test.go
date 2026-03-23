@@ -302,6 +302,637 @@ func TestPathSystem_StableKeyRefind(t *testing.T) {
 	}
 }
 
+// ==================== Complex Scenario Tests ====================
+
+func TestPathSystem_SameNameContacts(t *testing.T) {
+	ps := NewPathSystem()
+
+	// Create realistic WeChat contact list with multiple same-name contacts
+	nodes := []windows.AccessibleNode{
+		{
+			Name:     "ContactList",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "张三",
+					Role:     "list item",
+					Bounds:   [4]int{10, 50, 200, 60},
+					TreePath: "[0].[0]",
+					Children: []windows.AccessibleNode{
+						{Name: "Message1", TreePath: "[0].[0].[0]"},
+					},
+				},
+				{
+					Name:     "张三", // Same name - different person
+					Role:     "list item",
+					Bounds:   [4]int{10, 120, 200, 60},
+					TreePath: "[0].[1]",
+					Children: []windows.AccessibleNode{
+						{Name: "Message2", TreePath: "[0].[1].[0]"},
+					},
+				},
+				{
+					Name:     "张三", // Third same-name contact
+					Role:     "list item",
+					Bounds:   [4]int{10, 190, 200, 60},
+					TreePath: "[0].[2]",
+					Children: []windows.AccessibleNode{
+						{Name: "Message3", TreePath: "[0].[2].[0]"},
+					},
+				},
+				{
+					Name:     "李四",
+					Role:     "list item",
+					Bounds:   [4]int{10, 260, 200, 60},
+					TreePath: "[0].[3]",
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		expectName  string
+		expectError bool
+	}{
+		{
+			name:       "Find first 张三 by path",
+			path:       "[0].[0]",
+			expectName: "张三",
+		},
+		{
+			name:       "Find second 张三 by path",
+			path:       "[0].[1]",
+			expectName: "张三",
+		},
+		{
+			name:       "Find third 张三 by path",
+			path:       "[0].[2]",
+			expectName: "张三",
+		},
+		{
+			name:       "Find message under first 张三",
+			path:       "[0].[0].[0]",
+			expectName: "Message1",
+		},
+		{
+			name:       "Find message under second 张三",
+			path:       "[0].[1].[0]",
+			expectName: "Message2",
+		},
+		{
+			name:       "Find message under third 张三",
+			path:       "[0].[2].[0]",
+			expectName: "Message3",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ps.FindNodeByPath(nodes, tt.path)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error for path '%s', got nil", tt.path)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+				}
+				if node == nil {
+					t.Errorf("Expected node for path '%s', got nil", tt.path)
+				} else if node.Name != tt.expectName {
+					t.Errorf("Expected name '%s', got '%s'", tt.expectName, node.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestPathSystem_TitleNodeSameNameAsContact(t *testing.T) {
+	ps := NewPathSystem()
+
+	// Create structure where title node has same name as contact
+	nodes := []windows.AccessibleNode{
+		{
+			Name:     "ChatWindow",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "张三", // Title node
+					Role:     "text",
+					Bounds:   [4]int{50, 10, 300, 25}, // Top position
+					TreePath: "[0].[0]",
+				},
+				{
+					Name:     "张三", // Contact node (same name)
+					Role:     "list item",
+					Bounds:   [4]int{10, 50, 200, 60},
+					TreePath: "[0].[1]",
+				},
+				{
+					Name:     "MessageArea",
+					Role:     "group",
+					Bounds:   [4]int{0, 80, 400, 300},
+					TreePath: "[0].[2]",
+					Children: []windows.AccessibleNode{
+						{
+							Name:     "张三",
+							Role:     "text",
+							Bounds:   [4]int{300, 100, 150, 40},
+							TreePath: "[0].[2].[0]",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		expectName  string
+		expectRole  string
+		expectError bool
+	}{
+		{
+			name:       "Find title node (top position)",
+			path:       "[0].[0]",
+			expectName: "张三",
+			expectRole: "text",
+		},
+		{
+			name:       "Find contact node (list item)",
+			path:       "[0].[1]",
+			expectName: "张三",
+			expectRole: "list item",
+		},
+		{
+			name:       "Find message bubble under message area",
+			path:       "[0].[2].[0]",
+			expectName: "张三",
+			expectRole: "text",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ps.FindNodeByPath(nodes, tt.path)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error for path '%s', got nil", tt.path)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+				}
+				if node == nil {
+					t.Errorf("Expected node for path '%s', got nil", tt.path)
+				} else {
+					if node.Name != tt.expectName {
+						t.Errorf("Expected name '%s', got '%s'", tt.expectName, node.Name)
+					}
+					if node.Role != tt.expectRole {
+						t.Errorf("Expected role '%s', got '%s'", tt.expectRole, node.Role)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestPathSystem_RightSideNodes(t *testing.T) {
+	ps := NewPathSystem()
+
+	// Create structure with right-aligned message bubbles and static text
+	nodes := []windows.AccessibleNode{
+		{
+			Name:     "ChatWindow",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "MessageArea",
+					Role:     "group",
+					Bounds:   [4]int{0, 80, 400, 300},
+					TreePath: "[0].[0]",
+					Children: []windows.AccessibleNode{
+						{
+							Name:     "Hello", // Right-aligned message bubble
+							Role:     "text",
+							Bounds:   [4]int{300, 100, 150, 40},
+							TreePath: "[0].[0].[0]",
+						},
+						{
+							Name:     "How are you?", // Left-aligned static text
+							Role:     "static",
+							Bounds:   [4]int{50, 150, 200, 30},
+							TreePath: "[0].[0].[1]",
+						},
+						{
+							Name:     "Input box",
+							Role:     "edit",
+							Bounds:   [4]int{100, 400, 200, 30},
+							TreePath: "[0].[0].[2]",
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		expectName  string
+		expectRole  string
+		expectError bool
+	}{
+		{
+			name:       "Find right-aligned message bubble",
+			path:       "[0].[0].[0]",
+			expectName: "Hello",
+			expectRole: "text",
+		},
+		{
+			name:       "Find left-aligned static text",
+			path:       "[0].[0].[1]",
+			expectName: "How are you?",
+			expectRole: "static",
+		},
+		{
+			name:       "Find input box",
+			path:       "[0].[0].[2]",
+			expectName: "Input box",
+			expectRole: "edit",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ps.FindNodeByPath(nodes, tt.path)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error for path '%s', got nil", tt.path)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+				}
+				if node == nil {
+					t.Errorf("Expected node for path '%s', got nil", tt.path)
+				} else {
+					if node.Name != tt.expectName {
+						t.Errorf("Expected name '%s', got '%s'", tt.expectName, node.Name)
+					}
+					if node.Role != tt.expectRole {
+						t.Errorf("Expected role '%s', got '%s'", tt.expectRole, node.Role)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestPathSystem_BoundsDrift(t *testing.T) {
+	ps := NewPathSystem()
+
+	// Create nodes with bounds that drift over time (simulating UI changes)
+	nodes := []windows.AccessibleNode{
+		{
+			Name:     "ContactList",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "张三",
+					Role:     "list item",
+					Bounds:   [4]int{10, 50, 200, 60}, // Original bounds
+					TreePath: "[0].[0]",
+				},
+				{
+					Name:     "李四",
+					Role:     "list item",
+					Bounds:   [4]int{10, 120, 200, 60}, // Original bounds
+					TreePath: "[0].[1]",
+				},
+			},
+		},
+	}
+
+	// Simulate bounds drift - same nodes, different bounds
+	nodesDrifted := []windows.AccessibleNode{
+		{
+			Name:     "ContactList",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "张三",
+					Role:     "list item",
+					Bounds:   [4]int{12, 52, 198, 58}, // Slightly shifted
+					TreePath: "[0].[0]",
+				},
+				{
+					Name:     "李四",
+					Role:     "list item",
+					Bounds:   [4]int{12, 122, 198, 58}, // Slightly shifted
+					TreePath: "[0].[1]",
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		expectName  string
+		expectError bool
+	}{
+		{
+			name:       "Find 张三 in original nodes",
+			path:       "[0].[0]",
+			expectName: "张三",
+		},
+		{
+			name:       "Find 李四 in original nodes",
+			path:       "[0].[1]",
+			expectName: "李四",
+		},
+		{
+			name:       "Find 张三 in drifted nodes (same path)",
+			path:       "[0].[0]",
+			expectName: "张三",
+		},
+		{
+			name:       "Find 李四 in drifted nodes (same path)",
+			path:       "[0].[1]",
+			expectName: "李四",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test with original nodes
+			node, err := ps.FindNodeByPath(nodes, tt.path)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error for path '%s', got nil", tt.path)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+				}
+				if node == nil {
+					t.Errorf("Expected node for path '%s', got nil", tt.path)
+				} else if node.Name != tt.expectName {
+					t.Errorf("Expected name '%s', got '%s'", tt.expectName, node.Name)
+				}
+			}
+
+			// Test with drifted nodes (path should still work)
+			nodeDrifted, errDrifted := ps.FindNodeByPath(nodesDrifted, tt.path)
+			if tt.expectError {
+				if errDrifted == nil {
+					t.Errorf("Expected error for drifted path '%s', got nil", tt.path)
+				}
+			} else {
+				if errDrifted != nil {
+					t.Errorf("Unexpected error for drifted path '%s': %v", tt.path, errDrifted)
+				}
+				if nodeDrifted == nil {
+					t.Errorf("Expected node for drifted path '%s', got nil", tt.path)
+				} else if nodeDrifted.Name != tt.expectName {
+					t.Errorf("Expected name '%s' in drifted nodes, got '%s'", tt.expectName, nodeDrifted.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestPathSystem_PathChanges(t *testing.T) {
+	ps := NewPathSystem()
+
+	// Create initial node structure
+	initialNodes := []windows.AccessibleNode{
+		{
+			Name:     "ContactList",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "张三",
+					Role:     "list item",
+					TreePath: "[0].[0]",
+				},
+				{
+					Name:     "李四",
+					Role:     "list item",
+					TreePath: "[0].[1]",
+				},
+				{
+					Name:     "王五",
+					Role:     "list item",
+					TreePath: "[0].[2]",
+				},
+			},
+		},
+	}
+
+	// Simulate path changes after contact list reordering
+	reorderedNodes := []windows.AccessibleNode{
+		{
+			Name:     "ContactList",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "李四", // Moved to top
+					Role:     "list item",
+					TreePath: "[0].[0]",
+				},
+				{
+					Name:     "王五", // Moved to middle
+					Role:     "list item",
+					TreePath: "[0].[1]",
+				},
+				{
+					Name:     "张三", // Moved to bottom
+					Role:     "list item",
+					TreePath: "[0].[2]",
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		expectName  string
+		expectError bool
+	}{
+		{
+			name:       "Find 张三 in initial order",
+			path:       "[0].[0]",
+			expectName: "张三",
+		},
+		{
+			name:       "Find 李四 in initial order",
+			path:       "[0].[1]",
+			expectName: "李四",
+		},
+		{
+			name:       "Find 王五 in initial order",
+			path:       "[0].[2]",
+			expectName: "王五",
+		},
+		{
+			name:       "Find 李四 in reordered (now at [0].[0])",
+			path:       "[0].[0]",
+			expectName: "李四",
+		},
+		{
+			name:       "Find 王五 in reordered (now at [0].[1])",
+			path:       "[0].[1]",
+			expectName: "王五",
+		},
+		{
+			name:       "Find 张三 in reordered (now at [0].[2])",
+			path:       "[0].[2]",
+			expectName: "张三",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var node *windows.AccessibleNode
+			var err error
+
+			// Determine which node set to use based on test name
+			if tt.name == "Find 张三 in reordered (now at [0].[2])" ||
+				tt.name == "Find 李四 in reordered (now at [0].[0])" ||
+				tt.name == "Find 王五 in reordered (now at [0].[1])" {
+				node, err = ps.FindNodeByPath(reorderedNodes, tt.path)
+			} else {
+				node, err = ps.FindNodeByPath(initialNodes, tt.path)
+			}
+
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error for path '%s', got nil", tt.path)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+				}
+				if node == nil {
+					t.Errorf("Expected node for path '%s', got nil", tt.path)
+				} else if node.Name != tt.expectName {
+					t.Errorf("Expected name '%s', got '%s'", tt.expectName, node.Name)
+				}
+			}
+		})
+	}
+}
+
+func TestPathSystem_DeeplyNestedNodes(t *testing.T) {
+	ps := NewPathSystem()
+
+	// Create deeply nested structure (5+ levels)
+	nodes := []windows.AccessibleNode{
+		{
+			Name:     "Level0",
+			TreePath: "[0]",
+			Children: []windows.AccessibleNode{
+				{
+					Name:     "Level1",
+					TreePath: "[0].[0]",
+					Children: []windows.AccessibleNode{
+						{
+							Name:     "Level2",
+							TreePath: "[0].[0].[0]",
+							Children: []windows.AccessibleNode{
+								{
+									Name:     "Level3",
+									TreePath: "[0].[0].[0].[0]",
+									Children: []windows.AccessibleNode{
+										{
+											Name:     "Level4",
+											TreePath: "[0].[0].[0].[0].[0]",
+											Children: []windows.AccessibleNode{
+												{
+													Name:     "Level5",
+													TreePath: "[0].[0].[0].[0].[0].[0]",
+													Children: []windows.AccessibleNode{
+														{Name: "DeepNode", TreePath: "[0].[0].[0].[0].[0].[0].[0]"},
+													},
+												},
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		path        string
+		expectName  string
+		expectError bool
+	}{
+		{
+			name:       "Find level 1",
+			path:       "[0].[0]",
+			expectName: "Level1",
+		},
+		{
+			name:       "Find level 2",
+			path:       "[0].[0].[0]",
+			expectName: "Level2",
+		},
+		{
+			name:       "Find level 3",
+			path:       "[0].[0].[0].[0]",
+			expectName: "Level3",
+		},
+		{
+			name:       "Find level 4",
+			path:       "[0].[0].[0].[0].[0]",
+			expectName: "Level4",
+		},
+		{
+			name:       "Find level 5",
+			path:       "[0].[0].[0].[0].[0].[0]",
+			expectName: "Level5",
+		},
+		{
+			name:       "Find deepest node",
+			path:       "[0].[0].[0].[0].[0].[0].[0]",
+			expectName: "DeepNode",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			node, err := ps.FindNodeByPath(nodes, tt.path)
+			if tt.expectError {
+				if err == nil {
+					t.Errorf("Expected error for path '%s', got nil", tt.path)
+				}
+			} else {
+				if err != nil {
+					t.Errorf("Unexpected error for path '%s': %v", tt.path, err)
+				}
+				if node == nil {
+					t.Errorf("Expected node for path '%s', got nil", tt.path)
+				} else if node.Name != tt.expectName {
+					t.Errorf("Expected name '%s', got '%s'", tt.expectName, node.Name)
+				}
+			}
+		})
+	}
+}
+
 // ==================== Path System Dirty Data Tests ====================
 
 func TestPathSystem_GeneratePath_DirtyData(t *testing.T) {

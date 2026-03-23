@@ -425,3 +425,191 @@ func TestMessageClassifier_ComplexScenarios(t *testing.T) {
 		}
 	}
 }
+
+// ==================== Complex Scenario Tests ====================
+
+func TestMessageClassifier_SameNameDifferentTypes(t *testing.T) {
+	mc := NewMessageClassifier()
+
+	// Test nodes with same name but different types
+	tests := []struct {
+		name     string
+		node     windows.AccessibleNode
+		expected NodeType
+	}{
+		{
+			name: "Same name '张三' as title",
+			node: windows.AccessibleNode{
+				Name:   "张三",
+				Role:   "text",
+				Bounds: [4]int{50, 10, 300, 25}, // Top position = title
+			},
+			expected: NodeTypeTitle,
+		},
+		{
+			name: "Same name '张三' as message bubble",
+			node: windows.AccessibleNode{
+				Name:   "张三",
+				Role:   "text",
+				Bounds: [4]int{300, 100, 150, 40}, // Right position = message bubble
+			},
+			expected: NodeTypeMessageBubble,
+		},
+		{
+			name: "Same name '张三' as normal text",
+			node: windows.AccessibleNode{
+				Name:   "张三",
+				Role:   "static",
+				Bounds: [4]int{50, 200, 200, 30}, // Left position = normal text
+			},
+			expected: NodeTypeNormalText,
+		},
+		{
+			name: "Same name '张三' as input box",
+			node: windows.AccessibleNode{
+				Name:   "张三",
+				Role:   "edit",
+				Bounds: [4]int{100, 500, 200, 30}, // Bottom position = input box
+			},
+			expected: NodeTypeInputBox,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := mc.ClassifyNode(tt.node)
+			if result != tt.expected {
+				t.Errorf("ClassifyNode() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMessageClassifier_DeeplyNestedChatScenario(t *testing.T) {
+	mc := NewMessageClassifier()
+
+	// Simulate a complex chat with multiple message types
+	chatNodes := []windows.AccessibleNode{
+		// Title
+		{Name: "Group Chat", Role: "text", Bounds: [4]int{50, 10, 300, 25}},
+		// Input area
+		{Name: "Type message...", Role: "edit", Bounds: [4]int{100, 550, 200, 30}},
+		// Multiple message bubbles (right-aligned)
+		{Name: "Hello everyone!", Role: "text", Bounds: [4]int{300, 100, 150, 40}},
+		{Name: "How are you?", Role: "text", Bounds: [4]int{300, 150, 150, 40}},
+		{Name: "Good morning!", Role: "text", Bounds: [4]int{300, 200, 150, 40}},
+		// Left-aligned messages
+		{Name: "Hi!", Role: "static", Bounds: [4]int{50, 250, 100, 30}},
+		{Name: "Nice to meet you", Role: "static", Bounds: [4]int{50, 290, 150, 30}},
+		// System messages
+		{Name: "User joined", Role: "status", Bounds: [4]int{200, 330, 100, 20}},
+		{Name: "Message sent", Role: "alert", Bounds: [4]int{200, 360, 100, 20}},
+		// More messages
+		{Name: "See you later", Role: "text", Bounds: [4]int{300, 400, 150, 40}},
+	}
+
+	filtered := mc.FilterMessageAreaNodes(chatNodes, 0)
+
+	// Should keep: 4 message bubbles, 2 static texts, 2 system prompts = 8 nodes
+	// Filter out: title (y=10), input (edit role)
+	expectedCount := 8
+	if len(filtered) != expectedCount {
+		t.Errorf("Expected %d filtered nodes, got %d", expectedCount, len(filtered))
+	}
+
+	// Verify no titles or input boxes in filtered results
+	for _, node := range filtered {
+		if node.Bounds[1] < 50 {
+			t.Errorf("Title node should be filtered out: %s", node.Name)
+		}
+		if node.Role == "edit" {
+			t.Errorf("Input box should be filtered out: %s", node.Name)
+		}
+	}
+}
+
+func TestMessageClassifier_BoundsDriftScenarios(t *testing.T) {
+	mc := NewMessageClassifier()
+
+	// Test nodes with slightly drifted bounds
+	tests := []struct {
+		name     string
+		node     windows.AccessibleNode
+		expected NodeType
+	}{
+		{
+			name: "Message bubble with small drift",
+			node: windows.AccessibleNode{
+				Name:   "Hello",
+				Role:   "text",
+				Bounds: [4]int{302, 102, 148, 38}, // Slightly shifted from original
+			},
+			expected: NodeTypeMessageBubble,
+		},
+		{
+			name: "Title with small drift",
+			node: windows.AccessibleNode{
+				Name:   "Chat Title",
+				Role:   "text",
+				Bounds: [4]int{52, 12, 298, 23}, // Slightly shifted
+			},
+			expected: NodeTypeTitle,
+		},
+		{
+			name: "Input box with small drift",
+			node: windows.AccessibleNode{
+				Name:   "Input",
+				Role:   "edit",
+				Bounds: [4]int{102, 502, 198, 28}, // Slightly shifted
+			},
+			expected: NodeTypeInputBox,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := mc.ClassifyNode(tt.node)
+			if result != tt.expected {
+				t.Errorf("ClassifyNode() = %v, want %v", result, tt.expected)
+			}
+		})
+	}
+}
+
+func TestMessageClassifier_RealisticWeChatScenario(t *testing.T) {
+	mc := NewMessageClassifier()
+
+	// Realistic WeChat chat window structure
+	chatNodes := []windows.AccessibleNode{
+		// Top title bar
+		{Name: "张三", Role: "text", Bounds: [4]int{50, 10, 300, 25}},
+		// Contact info area
+		{Name: "Online", Role: "status", Bounds: [4]int{350, 15, 100, 20}},
+		// Message area with mixed content
+		{Name: "张三", Role: "text", Bounds: [4]int{300, 80, 150, 40}}, // Message bubble
+		{Name: "Hello", Role: "text", Bounds: [4]int{300, 130, 150, 40}},
+		{Name: "How are you?", Role: "static", Bounds: [4]int{50, 180, 200, 30}},
+		{Name: "I'm good thanks", Role: "text", Bounds: [4]int{300, 220, 150, 40}},
+		// System message
+		{Name: "Message delivered", Role: "status", Bounds: [4]int{200, 270, 100, 20}},
+		// Input area
+		{Name: "Type a message...", Role: "edit", Bounds: [4]int{100, 500, 200, 30}},
+	}
+
+	filtered := mc.FilterMessageAreaNodes(chatNodes, 0)
+
+	// Expected: 5 message nodes (2 bubbles + 2 static + 1 system)
+	// Filter out: title (y=10), contact status (y=15), input (edit)
+	expectedCount := 5
+	if len(filtered) != expectedCount {
+		t.Errorf("Expected %d filtered nodes, got %d", expectedCount, len(filtered))
+	}
+
+	// Verify specific nodes are kept
+	expectedNames := []string{"张三", "Hello", "How are you?", "I'm good thanks", "Message delivered"}
+	for i, node := range filtered {
+		if node.Name != expectedNames[i] {
+			t.Errorf("Node %d: expected name '%s', got '%s'", i, expectedNames[i], node.Name)
+		}
+	}
+}

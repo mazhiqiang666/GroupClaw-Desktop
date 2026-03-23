@@ -543,3 +543,273 @@ func TestEvidenceCollector_CalculateChatAreaDiff(t *testing.T) {
 		})
 	}
 }
+
+// ==================== Complex Scenario Tests ====================
+
+func TestEvidenceCollector_SameNameContactsActivation(t *testing.T) {
+	ec := NewEvidenceCollector()
+
+	// Test activation evidence with same-name contacts
+	conv := protocol.ConversationRef{
+		DisplayName: "张三",
+	}
+
+	tests := []struct {
+		name          string
+		nodes         []windows.AccessibleNode
+		originalNodes []windows.AccessibleNode
+		locateSource  string
+		expectExists  bool
+		expectActive  bool
+	}{
+		{
+			name: "Multiple same-name contacts, one active",
+			nodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "selected", Bounds: [4]int{50, 50, 200, 60}},
+				{Name: "张三", Role: "list item", Bounds: [4]int{50, 120, 200, 60}},
+				{Name: "张三", Role: "list item", Bounds: [4]int{50, 190, 200, 60}},
+			},
+			originalNodes: []windows.AccessibleNode{},
+			locateSource:  "tree_path_name",
+			expectExists:  true,
+			expectActive:  true,
+		},
+		{
+			name: "Multiple same-name contacts, none active",
+			nodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{50, 50, 200, 60}},
+				{Name: "张三", Role: "list item", Bounds: [4]int{50, 120, 200, 60}},
+			},
+			originalNodes: []windows.AccessibleNode{},
+			locateSource:  "name_match",
+			expectExists:  true,
+			expectActive:  false,
+		},
+		{
+			name: "Same-name contact with different bounds",
+			nodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "selected", Bounds: [4]int{100, 100, 180, 50}},
+			},
+			originalNodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{50, 50, 200, 60}},
+			},
+			locateSource:  "bounds_match",
+			expectExists:  true,
+			expectActive:  true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evidence := ec.CollectActivationEvidence(conv, tt.nodes, tt.originalNodes, tt.locateSource)
+
+			if evidence.NodeStillExists != tt.expectExists {
+				t.Errorf("NodeStillExists = %v, want %v", evidence.NodeStillExists, tt.expectExists)
+			}
+			if evidence.HasActiveState != tt.expectActive {
+				t.Errorf("HasActiveState = %v, want %v", evidence.HasActiveState, tt.expectActive)
+			}
+			if evidence.Confidence < 0 || evidence.Confidence > 1 {
+				t.Errorf("Confidence out of range: %f", evidence.Confidence)
+			}
+		})
+	}
+}
+
+func TestEvidenceCollector_MultipleMessageScenarios(t *testing.T) {
+	ec := NewEvidenceCollector()
+
+	tests := []struct {
+		name             string
+		beforeNodes      []windows.AccessibleNode
+		afterNodes       []windows.AccessibleNode
+		expectNewNodes   int
+		expectConfidence float64
+	}{
+		{
+			name: "Single new message",
+			beforeNodes: []windows.AccessibleNode{
+				{Name: "Hello", Role: "text", Bounds: [4]int{300, 100, 150, 40}},
+			},
+			afterNodes: []windows.AccessibleNode{
+				{Name: "Hello", Role: "text", Bounds: [4]int{300, 100, 150, 40}},
+				{Name: "Hi there!", Role: "text", Bounds: [4]int{300, 150, 150, 40}},
+			},
+			expectNewNodes:   1,
+			expectConfidence: 0.7, // Partial evidence
+		},
+		{
+			name: "Multiple new messages",
+			beforeNodes: []windows.AccessibleNode{},
+			afterNodes: []windows.AccessibleNode{
+				{Name: "Msg1", Role: "text", Bounds: [4]int{300, 100, 150, 40}},
+				{Name: "Msg2", Role: "text", Bounds: [4]int{300, 150, 150, 40}},
+				{Name: "Msg3", Role: "text", Bounds: [4]int{300, 200, 150, 40}},
+			},
+			expectNewNodes:   3,
+			expectConfidence: 0.7, // Partial evidence (no screenshot diff)
+		},
+		{
+			name: "Same message content, different position",
+			beforeNodes: []windows.AccessibleNode{
+				{Name: "Hello", Role: "text", Bounds: [4]int{300, 100, 150, 40}},
+			},
+			afterNodes: []windows.AccessibleNode{
+				{Name: "Hello", Role: "text", Bounds: [4]int{300, 150, 150, 40}},
+			},
+			expectNewNodes:   1, // Different bounds = different node
+			expectConfidence: 0.7,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evidence := ec.CollectMessageEvidence(
+				tt.beforeNodes, tt.afterNodes,
+				[]byte{1, 2, 3, 4, 5}, // Dummy screenshot
+				[]byte{1, 2, 3, 4, 6}, // Different screenshot
+				[4]int{200, 100, 200, 30},
+			)
+
+			if evidence.NewMessageNodes != tt.expectNewNodes {
+				t.Errorf("NewMessageNodes = %d, want %d", evidence.NewMessageNodes, tt.expectNewNodes)
+			}
+			if evidence.Confidence < 0 || evidence.Confidence > 1 {
+				t.Errorf("Confidence out of range: %f", evidence.Confidence)
+			}
+		})
+	}
+}
+
+func TestEvidenceCollector_DeliveryStateEdgeCases(t *testing.T) {
+	ec := NewEvidenceCollector()
+
+	tests := []struct {
+		name                string
+		activationEvidence  ActivationEvidence
+		messageEvidence     MessageEvidence
+		expectedState       string
+		expectedMinConf     float64
+		expectedMaxConf     float64
+	}{
+		{
+			name: "High confidence verified",
+			activationEvidence: ActivationEvidence{
+				HasActiveState:  true,
+				NodeStillExists: true,
+				HasTitleChange:  true,
+				HasPanelSwitch:  true,
+				Confidence:      1.0,
+			},
+			messageEvidence: MessageEvidence{
+				NewMessageNodes:   1,
+				ScreenshotChanged: true,
+				ChatAreaDiff:      0.1,
+				Confidence:        1.0,
+			},
+			expectedState:   "verified",
+			expectedMinConf: 1.0,
+			expectedMaxConf: 1.0,
+		},
+		{
+			name: "Borderline verified (0.8 threshold)",
+			activationEvidence: ActivationEvidence{
+				HasActiveState:  true,
+				NodeStillExists: true,
+				Confidence:      0.8,
+			},
+			messageEvidence: MessageEvidence{
+				NewMessageNodes: 1,
+				Confidence:      0.8,
+			},
+			expectedState:   "verified",
+			expectedMinConf: 0.8,
+			expectedMaxConf: 0.8,
+		},
+		{
+			name: "Borderline unverified (0.5 threshold)",
+			activationEvidence: ActivationEvidence{
+				HasActiveState:  true,
+				NodeStillExists: true,
+				Confidence:      0.5,
+			},
+			messageEvidence: MessageEvidence{
+				NewMessageNodes: 1,
+				Confidence:      0.5,
+			},
+			expectedState:   "sent_unverified",
+			expectedMinConf: 0.5,
+			expectedMaxConf: 0.5,
+		},
+		{
+			name: "Just below verified threshold",
+			activationEvidence: ActivationEvidence{
+				HasActiveState:  true,
+				NodeStillExists: true,
+				Confidence:      0.79,
+			},
+			messageEvidence: MessageEvidence{
+				NewMessageNodes: 1,
+				Confidence:      0.79,
+			},
+			expectedState:   "sent_unverified",
+			expectedMinConf: 0.5,
+			expectedMaxConf: 0.79,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			state, confidence := ec.DetermineDeliveryState(tt.activationEvidence, tt.messageEvidence)
+
+			if state != tt.expectedState {
+				t.Errorf("State = %s, want %s", state, tt.expectedState)
+			}
+			if confidence < tt.expectedMinConf || confidence > tt.expectedMaxConf {
+				t.Errorf("Confidence = %f, want in range [%f, %f]", confidence, tt.expectedMinConf, tt.expectedMaxConf)
+			}
+		})
+	}
+}
+
+func TestEvidenceCollector_RealisticWeChatScenario(t *testing.T) {
+	ec := NewEvidenceCollector()
+
+	conv := protocol.ConversationRef{
+		DisplayName: "张三",
+	}
+
+	// Simulate realistic WeChat activation scenario
+	nodes := []windows.AccessibleNode{
+		{Name: "ContactList", Role: "group", Bounds: [4]int{0, 0, 200, 600}},
+		{Name: "张三", Role: "selected", Bounds: [4]int{10, 50, 180, 60}},
+		{Name: "李四", Role: "list item", Bounds: [4]int{10, 120, 180, 60}},
+		{Name: "ChatArea", Role: "group", Bounds: [4]int{200, 0, 400, 600}},
+		{Name: "张三", Role: "text", Bounds: [4]int{250, 10, 300, 25}}, // Title
+	}
+
+	originalNodes := []windows.AccessibleNode{
+		{Name: "ContactList", Role: "group", Bounds: [4]int{0, 0, 200, 600}},
+		{Name: "李四", Role: "list item", Bounds: [4]int{10, 50, 180, 60}},
+		{Name: "王五", Role: "list item", Bounds: [4]int{10, 120, 180, 60}},
+	}
+
+	evidence := ec.CollectActivationEvidence(conv, nodes, originalNodes, "tree_path_name")
+
+	// Verify all evidence flags
+	if !evidence.NodeStillExists {
+		t.Error("Expected NodeStillExists to be true")
+	}
+	if !evidence.HasActiveState {
+		t.Error("Expected HasActiveState to be true")
+	}
+	if !evidence.HasTitleChange {
+		t.Error("Expected HasTitleChange to be true")
+	}
+	if !evidence.HasPanelSwitch {
+		t.Error("Expected HasPanelSwitch to be true")
+	}
+	if evidence.Confidence < 0.8 {
+		t.Errorf("Expected confidence >= 0.8, got %f", evidence.Confidence)
+	}
+}

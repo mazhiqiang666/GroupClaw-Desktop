@@ -178,17 +178,33 @@ func TestPositioningStrategyRules_FindNodeByStrategy(t *testing.T) {
 		t.Errorf("Expected source 'bounds_match', got %s", result2.Source)
 	}
 
+	// Test strategy 3: Stable key match (PreviewText)
+	// Generate the expected stable key for the node
+	expectedKey := "[1]||list item|李四|50_150_150_40"
+	convStableKey := protocol.ConversationRef{
+		DisplayName: "李四",
+		PreviewText: expectedKey,
+	}
+
+	resultStableKey := rules.FindNodeByStrategy(nodes, convStableKey)
+	if resultStableKey.Node == nil || resultStableKey.Node.Name != "李四" {
+		t.Errorf("Expected to find '李四' by stable key match, got %v", resultStableKey.Node)
+	}
+	if resultStableKey.Source != "stable_key" {
+		t.Errorf("Expected source 'stable_key', got %s", resultStableKey.Source)
+	}
+
 	// Test strategy 4: Name match only
-	conv3 := protocol.ConversationRef{
+	convNameMatch := protocol.ConversationRef{
 		DisplayName: "张三",
 	}
 
-	result3 := rules.FindNodeByStrategy(nodes, conv3)
-	if result3.Node == nil || result3.Node.Name != "张三" {
-		t.Errorf("Expected to find '张三' by name match, got %v", result3.Node)
+	resultNameMatch := rules.FindNodeByStrategy(nodes, convNameMatch)
+	if resultNameMatch.Node == nil || resultNameMatch.Node.Name != "张三" {
+		t.Errorf("Expected to find '张三' by name match, got %v", resultNameMatch.Node)
 	}
-	if result3.Source != "name_match" {
-		t.Errorf("Expected source 'name_match', got %s", result3.Source)
+	if resultNameMatch.Source != "name_match" {
+		t.Errorf("Expected source 'name_match', got %s", resultNameMatch.Source)
 	}
 
 	// Test no match
