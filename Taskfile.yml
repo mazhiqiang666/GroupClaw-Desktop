@@ -1,0 +1,52 @@
+# Taskfile for auto-customer-service
+# Install: https://taskfile.dev
+
+version: '3'
+
+tasks:
+  default:
+    desc: 'Show available tasks'
+    cmds:
+      - task --list
+
+  test-unit:
+    desc: 'Run unit tests (fast, no external dependencies)'
+    cmds:
+      - go test -v ./tests/unit/... -timeout 30s
+
+  test-integration:
+    desc: 'Run integration tests (may require external dependencies)'
+    cmds:
+      - go test -v ./tests/integration/... -timeout 60s
+
+  test-gateway:
+    desc: 'Run gateway tests (WebSocket server tests)'
+    cmds:
+      - go test -v ./internal/gateway/... -timeout 60s
+
+  test-all:
+    desc: 'Run all tests'
+    deps:
+      - test-unit
+      - test-integration
+      - test-gateway
+
+  run-mock-chat:
+    desc: 'Run mock chat application'
+    cmds:
+      - go run ./cmd/mock-chat/main.go
+
+  run-gateway:
+    desc: 'Run gateway server'
+    cmds:
+      - go run ./cmd/gateway/main.go
+
+  build:
+    desc: 'Build all packages'
+    cmds:
+      - go build ./...
+
+  clean:
+    desc: 'Clean build artifacts'
+    cmds:
+      - go clean ./...
