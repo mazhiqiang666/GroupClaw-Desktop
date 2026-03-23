@@ -64,8 +64,15 @@ func main() {
 			log.Fatal("Usage: wechat-debug send --contact <name> [--message <content>]")
 		}
 		sendMessage(wechatAdapter, *contactName, *messageContent)
+	case "verify":
+		if *contactName == "" {
+			log.Fatal("Usage: wechat-debug verify --contact <name> [--message <content>]")
+		}
+		verifyMessage(wechatAdapter, *contactName, *messageContent)
 	case "full-test":
 		fullTestFlow(wechatAdapter)
+	case "run-chain":
+		runChain(wechatAdapter)
 	default:
 		printUsage()
 	}
@@ -80,12 +87,14 @@ func printUsage() {
 	fmt.Println("  wechat-debug scan                     - Scan conversation list")
 	fmt.Println("  wechat-debug focus --contact <name>   - Focus on specific contact")
 	fmt.Println("  wechat-debug send --contact <name> [--message <content>] - Send message to contact")
+	fmt.Println("  wechat-debug verify --contact <name> [--message <content>] - Verify message delivery")
 	fmt.Println("  wechat-debug full-test                - Run full test flow")
+	fmt.Println("  wechat-debug run-chain                - Run complete chain: scan -> focus -> send -> verify")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                                - Output as JSON")
-	fmt.Println("  --contact <name>                      - Contact name for focus/send")
-	fmt.Println("  --message <content>                   - Message content to send")
+	fmt.Println("  --contact <name>                      - Contact name for focus/send/verify")
+	fmt.Println("  --message <content>                   - Message content to send/verify")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  wechat-debug find-window")
@@ -93,7 +102,9 @@ func printUsage() {
 	fmt.Println("  wechat-debug scan")
 	fmt.Println("  wechat-debug focus --contact \"张三\"")
 	fmt.Println("  wechat-debug send --contact \"张三\" --message \"Hello from debug script\"")
+	fmt.Println("  wechat-debug verify --contact \"张三\" --message \"Hello from debug script\"")
 	fmt.Println("  wechat-debug full-test")
+	fmt.Println("  wechat-debug run-chain --contact \"张三\" --message \"Test message\"")
 }
 
 func findWeChatWindow(wechatAdapter *wechat.WeChatAdapter) {
@@ -388,4 +399,151 @@ func fullTestFlow(wechatAdapter *wechat.WeChatAdapter) {
 
 	fmt.Println()
 	fmt.Println("=== Test Flow Complete ===")
+}
+
+func verifyMessage(wechatAdapter *wechat.WeChatAdapter, contactName string, message string) {
+	instances, result := wechatAdapter.Detect()
+	if result.Status != adapter.StatusSuccess || len(instances) == 0 {
+		log.Fatal("No WeChat window found")
+	}
+
+	conversations, scanResult := wechatAdapter.Scan(instances[0])
+	if scanResult.Status != adapter.StatusSuccess {
+		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	}
+
+	// Find the contact
+	var targetConv *protocol.ConversationRef
+	for i := range conversations {
+		if conversations[i].DisplayName == contactName {
+			targetConv = &conversations[i]
+			break
+		}
+	}
+
+	if targetConv == nil {
+		log.Fatalf("Contact '%s' not found in conversation list", contactName)
+	}
+
+	fmt.Printf("Verifying message delivery for %s: %s\n", contactName, message)
+
+	// Verify the message
+	verifyResult, verifyAdapterResult := wechatAdapter.Verify(*targetConv, message, 5*time.Second)
+
+	if *jsonOutput {
+		data := map[string]interface{}{
+			"contact":     contactName,
+			"message":     message,
+			"success":     verifyAdapterResult.Status == adapter.StatusSuccess,
+			"confidence":  verifyAdapterResult.Confidence,
+			"diagnostics": verifyAdapterResult.Diagnostics,
+		}
+		jsonData, _ := json.MarshalIndent(data, "", "  ")
+		fmt.Println(string(jsonData))
+	} else {
+		fmt.Printf("Verify result:\n")
+		fmt.Printf("  Status: %s\n", verifyAdapterResult.Status)
+		fmt.Printf("  Confidence: %.2f\n", verifyAdapterResult.Confidence)
+		fmt.Printf("  Diagnostics:\n")
+		for _, diag := range verifyAdapterResult.Diagnostics {
+			fmt.Printf("    %s: %s\n", diag.Level, diag.Message)
+			for k, v := range diag.Context {
+				fmt.Printf("      %s: %s\n", k, v)
+			}
+		}
+	}
+	_ = verifyResult // Keep for future use
+}
+
+func runChain(wechatAdapter *wechat.WeChatAdapter) {
+	fmt.Println("=== Running Complete Chain: Scan -> Focus -> Send -> Verify ===")
+	fmt.Println()
+
+	// Step 1: Detect WeChat instance
+	fmt.Println("Step 1: Detecting WeChat instance...")
+	instances, detectResult := wechatAdapter.Detect()
+	if detectResult.Status != adapter.StatusSuccess || len(instances) == 0 {
+		log.Fatal("No WeChat window found")
+	}
+	fmt.Printf("  Found WeChat instance: %s\n", instances[0].InstanceID)
+	fmt.Println()
+
+	// Step 2: Scan conversations
+	fmt.Println("Step 2: Scanning conversation list...")
+	conversations, scanResult := wechatAdapter.Scan(instances[0])
+	if scanResult.Status != adapter.StatusSuccess {
+		log.Fatalf("Failed to scan: %s", scanResult.Error)
+	}
+	fmt.Printf("  Found %d conversations\n", len(conversations))
+	for i, conv := range conversations {
+		fmt.Printf("    [%d] %s (position: %d)\n", i+1, conv.DisplayName, conv.ListPosition)
+	}
+	fmt.Printf("\n  Scan Diagnostics:\n")
+	for _, diag := range scanResult.Diagnostics {
+		for k, v := range diag.Context {
+			fmt.Printf("    %s: %s\n", k, v)
+		}
+	}
+	fmt.Println()
+
+	// Step 3: Find and focus on target contact
+	var targetConv *protocol.ConversationRef
+	if *contactName != "" {
+		for i := range conversations {
+			if conversations[i].DisplayName == *contactName {
+				targetConv = &conversations[i]
+				break
+			}
+		}
+		if targetConv == nil {
+			log.Fatalf("Contact '%s' not found", *contactName)
+		}
+	} else if len(conversations) > 0 {
+		targetConv = &conversations[0]
+	} else {
+		log.Fatal("No conversations found to test")
+	}
+
+	fmt.Printf("Step 3: Focusing on contact: %s\n", targetConv.DisplayName)
+	focusResult := wechatAdapter.Focus(*targetConv)
+	fmt.Printf("  Focus confidence: %.2f\n", focusResult.Confidence)
+	fmt.Printf("  Focus Diagnostics:\n")
+	for _, diag := range focusResult.Diagnostics {
+		for k, v := range diag.Context {
+			fmt.Printf("    %s: %s\n", k, v)
+		}
+	}
+	fmt.Println()
+
+	// Step 4: Send message
+	fmt.Println("Step 4: Sending message...")
+	time.Sleep(200 * time.Millisecond)
+	sendResult := wechatAdapter.Send(*targetConv, *messageContent, "debug-chain")
+	fmt.Printf("  Send confidence: %.2f\n", sendResult.Confidence)
+	fmt.Printf("  Send Diagnostics:\n")
+	for _, diag := range sendResult.Diagnostics {
+		for k, v := range diag.Context {
+			fmt.Printf("    %s: %s\n", k, v)
+		}
+	}
+	fmt.Println()
+
+	// Step 5: Verify message delivery
+	fmt.Println("Step 5: Verifying message delivery...")
+	verifyResult, verifyAdapterResult := wechatAdapter.Verify(*targetConv, *messageContent, 5*time.Second)
+	if verifyAdapterResult.Status == adapter.StatusSuccess {
+		fmt.Printf("  Verify confidence: %.2f\n", verifyAdapterResult.Confidence)
+		fmt.Printf("  Verify Diagnostics:\n")
+		for _, diag := range verifyAdapterResult.Diagnostics {
+			for k, v := range diag.Context {
+				fmt.Printf("    %s: %s\n", k, v)
+			}
+		}
+	} else {
+		fmt.Printf("  Verify failed: %s\n", verifyAdapterResult.Error)
+	}
+	_ = verifyResult // Keep for future use
+
+	fmt.Println()
+	fmt.Println("=== Chain Complete ===")
 }

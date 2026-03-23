@@ -10,7 +10,7 @@ import (
 )
 
 // stateChangingMockBridge is a mock bridge that tracks node state changes
-// before/after operations to simulate real-world behavior
+// based on actual operations (click, send keys) to simulate real-world behavior
 type stateChangingMockBridge struct {
 	initialized    bool
 	findResult     []uintptr
@@ -19,16 +19,16 @@ type stateChangingMockBridge struct {
 	windowTitle    string
 	enumerateError adapter.Result
 
-	// Node state tracking
-	nodesBeforeFocus []windows.AccessibleNode
-	nodesAfterFocus  []windows.AccessibleNode
-	nodesBeforeSend  []windows.AccessibleNode
-	nodesAfterSend   []windows.AccessibleNode
+	// Session state tracking
+	currentActiveSession uintptr // Handle of currently active session
+	sendState            sendStateType
+
+	// Node definitions for different states
+	nodesInitial      []windows.AccessibleNode // Initial conversation list
+	nodesAfterFocus   []windows.AccessibleNode // After focusing on a session
+	nodesAfterSend    []windows.AccessibleNode // After sending a message
 
 	// Operation tracking
-	focusCalled      bool
-	sendCalled       bool
-	verifyCalled     bool
 	lastFocusHandle  uintptr
 	lastSendContent  string
 	sendKeysCalls    []string
@@ -38,6 +38,15 @@ type stateChangingMockBridge struct {
 	beforeScreenshot []byte
 	afterScreenshot  []byte
 }
+
+// sendStateType tracks the progress of send operation
+type sendStateType int
+
+const (
+	sendStateNone sendStateType = iota
+	sendStatePasteCalled
+	sendStateEnterCalled
+)
 
 func newStateChangingMockBridge() *stateChangingMockBridge {
 	return &stateChangingMockBridge{
@@ -51,77 +60,90 @@ func newStateChangingMockBridge() *stateChangingMockBridge {
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 		},
-		// Default nodes before focus (conversation list)
-		nodesBeforeFocus: []windows.AccessibleNode{
+		// Initial conversation list (no session selected)
+		nodesInitial: []windows.AccessibleNode{
 			{
-				Handle: 1,
-				Name:   "张三",
-				Role:   "list item",
-				Bounds: [4]int{10, 50, 180, 40},
+				Handle:    1,
+				Name:      "张三",
+				Role:      "list item",
+				ClassName: "ListViewItem",
+				Bounds:    [4]int{10, 50, 180, 40},
+				TreePath:  "[0]",
 			},
 			{
-				Handle: 2,
-				Name:   "李四",
-				Role:   "list item",
-				Bounds: [4]int{10, 90, 180, 40},
+				Handle:    2,
+				Name:      "李四",
+				Role:      "list item",
+				ClassName: "ListViewItem",
+				Bounds:    [4]int{10, 90, 180, 40},
+				TreePath:  "[1]",
 			},
 		},
-		// Nodes after focus (same list, but with active state)
+		// Nodes after focus (session selected, message area visible)
 		nodesAfterFocus: []windows.AccessibleNode{
 			{
-				Handle: 1,
-				Name:   "张三",
-				Role:   "list item selected",
-				Bounds: [4]int{10, 50, 180, 40},
+				Handle:    1,
+				Name:      "张三",
+				Role:      "list item selected",
+				ClassName: "ListViewItem",
+				Bounds:    [4]int{10, 50, 180, 40},
+				TreePath:  "[0]",
 			},
 			{
-				Handle: 2,
-				Name:   "李四",
-				Role:   "list item",
-				Bounds: [4]int{10, 90, 180, 40},
+				Handle:    2,
+				Name:      "李四",
+				Role:      "list item",
+				ClassName: "ListViewItem",
+				Bounds:    [4]int{10, 90, 180, 40},
+				TreePath:  "[1]",
 			},
 			// Message area nodes
 			{
-				Handle: 100,
-				Name:   "Message Area",
-				Role:   "text",
-				Bounds: [4]int{200, 100, 300, 200},
+				Handle:    100,
+				Name:      "Message Area",
+				Role:      "text",
+				ClassName: "Edit",
+				Bounds:    [4]int{200, 100, 300, 200},
+				TreePath:  "[2]",
 			},
 		},
-		// Nodes before send (no new message)
-		nodesBeforeSend: []windows.AccessibleNode{
-			{
-				Handle: 1,
-				Name:   "张三",
-				Role:   "list item selected",
-				Bounds: [4]int{10, 50, 180, 40},
-			},
-			{
-				Handle: 100,
-				Name:   "Message Area",
-				Role:   "text",
-				Bounds: [4]int{200, 100, 300, 200},
-			},
-		},
-		// Nodes after send (with new message)
+		// Nodes after send (with new message node)
 		nodesAfterSend: []windows.AccessibleNode{
 			{
-				Handle: 1,
-				Name:   "张三",
-				Role:   "list item selected",
-				Bounds: [4]int{10, 50, 180, 40},
+				Handle:    1,
+				Name:      "张三",
+				Role:      "list item selected",
+				ClassName: "ListViewItem",
+				Bounds:    [4]int{10, 50, 180, 40},
+				TreePath:  "[0]",
+				Children:  []windows.AccessibleNode{},
 			},
 			{
-				Handle: 100,
-				Name:   "Message Area",
-				Role:   "text",
-				Bounds: [4]int{200, 100, 300, 200},
+				Handle:    2,
+				Name:      "李四",
+				Role:      "list item",
+				ClassName: "ListViewItem",
+				Bounds:    [4]int{10, 90, 180, 40},
+				TreePath:  "[1]",
+				Children:  []windows.AccessibleNode{},
 			},
 			{
-				Handle: 101,
-				Name:   "Test message",
-				Role:   "text",
-				Bounds: [4]int{210, 110, 280, 30},
+				Handle:    100,
+				Name:      "Message Area",
+				Role:      "text",
+				ClassName: "Edit",
+				Bounds:    [4]int{200, 100, 300, 200},
+				TreePath:  "[2]",
+				Children:  []windows.AccessibleNode{},
+			},
+			{
+				Handle:    101,
+				Name:      "Test message",
+				Role:      "text",
+				ClassName: "Static",
+				Bounds:    [4]int{210, 110, 280, 30},
+				TreePath:  "[2].[0]",
+				Children:  []windows.AccessibleNode{},
 			},
 		},
 		// Screenshots (simple byte arrays for testing)
@@ -194,8 +216,8 @@ func (m *stateChangingMockBridge) GetWindowInfo(handle uintptr) (windows.WindowI
 }
 
 func (m *stateChangingMockBridge) FocusWindow(handle uintptr) adapter.Result {
-	m.focusCalled = true
 	m.lastFocusHandle = handle
+	m.currentActiveSession = handle
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -207,22 +229,23 @@ func (m *stateChangingMockBridge) EnumerateAccessibleNodes(windowHandle uintptr)
 		return nil, m.enumerateError
 	}
 
-	// Return different nodes based on operation state
-	if m.sendCalled {
-		// After send operation
+	// Return different nodes based on current state
+	// State progression: initial -> after focus -> after send (paste + enter)
+	if m.sendState == sendStateEnterCalled {
+		// After send operation (paste + enter both called)
 		return m.nodesAfterSend, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 		}
-	} else if m.focusCalled {
-		// After focus operation
+	} else if m.currentActiveSession != 0 {
+		// After focus operation (session selected)
 		return m.nodesAfterFocus, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 		}
 	}
-	// Before any operation
-	return m.nodesBeforeFocus, adapter.Result{
+	// Initial state (no session selected)
+	return m.nodesInitial, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
 	}
@@ -236,12 +259,14 @@ func (m *stateChangingMockBridge) GetAccessible(windowHandle uintptr) (*windows.
 }
 
 func (m *stateChangingMockBridge) CaptureWindow(handle uintptr) ([]byte, adapter.Result) {
-	if m.sendCalled {
+	if m.sendState == sendStateEnterCalled {
+		// After send operation - screenshot should show new message
 		return m.afterScreenshot, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 		}
 	}
+	// Before send operation
 	return m.beforeScreenshot, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -249,8 +274,15 @@ func (m *stateChangingMockBridge) CaptureWindow(handle uintptr) ([]byte, adapter
 }
 
 func (m *stateChangingMockBridge) SendKeys(handle uintptr, keys string) adapter.Result {
-	m.sendCalled = true
 	m.sendKeysCalls = append(m.sendKeysCalls, keys)
+
+	// Track send state progression
+	if keys == "^v" { // Paste command
+		m.sendState = sendStatePasteCalled
+	} else if keys == "{ENTER}" { // Enter command
+		m.sendState = sendStateEnterCalled
+	}
+
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -258,6 +290,18 @@ func (m *stateChangingMockBridge) SendKeys(handle uintptr, keys string) adapter.
 }
 
 func (m *stateChangingMockBridge) Click(handle uintptr, x, y int) adapter.Result {
+	// Simulate clicking on a conversation item in the list
+	// Check if click is within the conversation list area (left side of window)
+	if x < 200 { // Conversation list is on the left side
+		// Find which conversation was clicked based on Y coordinate
+		for _, node := range m.nodesInitial {
+			if y >= node.Bounds[1] && y <= node.Bounds[1]+node.Bounds[3] {
+				m.currentActiveSession = node.Handle
+				m.lastFocusHandle = node.Handle
+				break
+			}
+		}
+	}
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -320,8 +364,8 @@ func TestDiagnosticFlow_CompleteChain(t *testing.T) {
 		t.Fatalf("Focus should succeed, got status: %v", focusResult.Status)
 	}
 
-	if !mock.focusCalled {
-		t.Error("Focus should have called bridge.FocusWindow")
+	if mock.currentActiveSession == 0 {
+		t.Error("Focus should have set currentActiveSession")
 	}
 
 	// Verify focus diagnostics
@@ -349,8 +393,8 @@ func TestDiagnosticFlow_CompleteChain(t *testing.T) {
 		t.Fatalf("Send should succeed, got status: %v", sendResult.Status)
 	}
 
-	if !mock.sendCalled {
-		t.Error("Send should have called bridge.SendKeys")
+	if mock.sendState != sendStateEnterCalled {
+		t.Error("Send should have completed paste + enter operations")
 	}
 
 	// Verify send diagnostics
@@ -413,8 +457,8 @@ func TestDiagnosticFlow_StateChanges(t *testing.T) {
 		t.Errorf("Expected 2 initial nodes, got %d", len(nodes))
 	}
 
-	// Simulate focus operation
-	mock.focusCalled = true
+	// Simulate focus operation by setting currentActiveSession
+	mock.currentActiveSession = 1 // Handle of "张三"
 	nodes, _ = mock.EnumerateAccessibleNodes(12345)
 	if len(nodes) != 3 {
 		t.Errorf("Expected 3 nodes after focus, got %d", len(nodes))
@@ -432,11 +476,11 @@ func TestDiagnosticFlow_StateChanges(t *testing.T) {
 		t.Error("Expected at least one node with 'selected' role after focus")
 	}
 
-	// Simulate send operation
-	mock.sendCalled = true
+	// Simulate send operation (paste + enter)
+	mock.sendState = sendStateEnterCalled
 	nodes, _ = mock.EnumerateAccessibleNodes(12345)
-	if len(nodes) != 3 {
-		t.Errorf("Expected 3 nodes after send, got %d", len(nodes))
+	if len(nodes) != 4 {
+		t.Errorf("Expected 4 nodes after send, got %d", len(nodes))
 	}
 
 	// Verify new message node exists

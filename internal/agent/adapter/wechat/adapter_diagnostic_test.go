@@ -42,16 +42,22 @@ func newControlledMockBridge() *controlledMockBridge {
 		},
 		nodes: []windows.AccessibleNode{
 			{
-				Handle: 1,
-				Name:   "张三",
-				Role:   "list item",
-				Bounds: [4]int{10, 50, 180, 40},
+				Handle:    1,
+				Name:      "张三",
+				Role:      "list item",
+				ClassName: "",
+				Bounds:    [4]int{10, 50, 180, 40},
+				Children:  []windows.AccessibleNode{},
+				TreePath:  "[0]",
 			},
 			{
-				Handle: 2,
-				Name:   "李四",
-				Role:   "list item",
-				Bounds: [4]int{10, 90, 180, 40},
+				Handle:    2,
+				Name:      "李四",
+				Role:      "list item",
+				ClassName: "",
+				Bounds:    [4]int{10, 90, 180, 40},
+				Children:  []windows.AccessibleNode{},
+				TreePath:  "[1]",
 			},
 		},
 	}
@@ -328,16 +334,22 @@ func TestWeChatAdapter_MinimumClosedLoop_WithControlledNodes(t *testing.T) {
 	// Set up controlled nodes with specific properties
 	mock.nodes = []windows.AccessibleNode{
 		{
-			Handle: 100,
-			Name:   "Test Conversation",
-			Role:   "list item",
-			Bounds: [4]int{10, 50, 180, 40},
+			Handle:    100,
+			Name:      "Test Conversation",
+			Role:      "list item",
+			ClassName: "",
+			Bounds:    [4]int{10, 50, 180, 40},
+			Children:  []windows.AccessibleNode{},
+			TreePath:  "[0]",
 		},
 		{
-			Handle: 101,
-			Name:   "Message Area",
-			Role:   "text",
-			Bounds: [4]int{200, 100, 300, 200},
+			Handle:    101,
+			Name:      "Message Area",
+			Role:      "text",
+			ClassName: "",
+			Bounds:    [4]int{200, 100, 300, 200},
+			Children:  []windows.AccessibleNode{},
+			TreePath:  "[1]",
 		},
 	}
 
