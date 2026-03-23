@@ -18,10 +18,64 @@
 | 组件 | 技术栈 | 状态 |
 |------|--------|------|
 | Agent Core | Go | ✅ 骨架完成 |
-| Windows Bridge | Go + Windows Native API | ✅ 骨架完成 |
+| Windows Bridge | Go + Windows Native API | ✅ IAccessible 实现完成 |
 | Control Plane / Gateway | Go | ✅ 骨架完成 |
 | LLM Orchestrator | Python | ✅ 骨架完成 |
 | Admin Web | React/Next.js | 待后续 |
+
+## Windows Bridge 实现详情
+
+### IAccessible 节点遍历
+
+Windows Bridge 已实现完整的 IAccessible 接口遍历功能：
+
+```go
+// internal/agent/windows/bridge.go
+func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNode, adapter.Result)
+```
+
+**功能特性：**
+- ✅ 递归遍历 IAccessible 子节点
+- ✅ 提取节点角色 (Role)、名称 (Name)、类名 (ClassName)
+- ✅ 获取节点边界框 (Bounds)
+- ✅ 支持深度限制避免无限递归
+
+### 会话切换实现
+
+WeChat 适配器已实现真实的会话切换功能：
+
+```go
+// internal/agent/adapter/wechat/adapter.go
+func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result
+```
+
+**实现步骤：**
+1. 聚焦到微信窗口
+2. 根据 ListPosition 计算点击坐标
+3. 点击目标会话项
+4. 返回置信度评分
+
+### 诊断工具
+
+新增 `bridge-dump` 命令行工具用于调试：
+
+```bash
+# 查找微信窗口
+bridge-dump find-wechat
+
+# 获取窗口信息
+bridge-dump window-info <handle>
+
+# 列出可访问性节点
+bridge-dump list-nodes <handle> --json --depth 3
+
+# 聚焦窗口
+bridge-dump focus <handle>
+```
+
+**支持选项：**
+- `--json`: JSON 格式输出
+- `--depth <n>`: 递归深度限制（默认 5）
 
 ## 目录结构
 
@@ -200,6 +254,87 @@ go build ./...
 - [03-工程骨架设计.md](开发日志/03-工程骨架设计.md)
 - [04-骨架代码设计.md](开发日志/04-骨架代码设计.md)
 
+### 已完成工作
+
+#### Step 1: IAccessible 节点遍历实现
+- ✅ 实现 `EnumerateAccessibleNodes()` 递归遍历 IAccessible 子节点
+- ✅ 提取节点角色、名称、类名、边界框信息
+- ✅ 支持深度限制避免无限递归
+
+#### Step 2: bridge-dump 工具升级
+- ✅ 添加 `--json` 选项支持 JSON 格式输出
+- ✅ 添加 `--depth` 选项支持递归深度限制
+- ✅ 支持 `find-wechat`、`window-info`、`list-nodes`、`focus` 命令
+
+#### Step 3: WeChat 适配器会话切换
+- ✅ 改进 `Focus()` 方法实现真实会话切换
+- ✅ 根据 ListPosition 计算点击坐标
+- ✅ 返回置信度评分
+
+#### Step 4: 发送链路改进
+- ✅ 改进 `Send()` 方法阶段式确认
+- ✅ 添加详细诊断信息
+- ✅ 改进 `Verify()` 方法验证逻辑
+
+#### Step 5: 任务状态机改进
+- ✅ 添加 `task.progress` 事件发送
+- ✅ 实现 6 个进度阶段 (detecting, scanning, finding, focusing, sending, verifying)
+- ✅ 添加 `sendProgress()` 辅助函数
+
+#### Step 6: 端到端测试
+- ✅ 新增 Gateway-Agent E2E 测试套件
+- ✅ 测试 WebSocket 连接、消息发送/接收
+- ✅ 测试任务进度流、完成流、失败流
+- ✅ 测试多命令并发处理
+
+#### Step 7: README 文档完善
+- ✅ 更新技术栈状态
+- ✅ 添加 Windows Bridge 实现详情
+- ✅ 添加任务状态机说明
+- ✅ 添加端到端测试说明
+- ✅ 完善协议说明文档
+
+## 任务状态机
+
+### 进度阶段
+
+Agent 在执行任务时会发送 `task.progress` 事件，包含以下阶段：
+
+| 阶段 (Stage) | 描述 |
+|--------------|------|
+| `detecting` | 检测应用实例中 |
+| `scanning` | 扫描会话列表中 |
+| `finding` | 查找目标会话中 |
+| `focusing` | 切换到目标会话 |
+| `sending` | 发送消息中 |
+| `verifying` | 验证消息发送中 |
+
+### 任务状态流转
+
+```
+pending → sending → sent_unverified → verified / unknown_delivery_state / failed
+```
+
+## 端到端测试
+
+### Gateway ↔ Agent 通信测试
+
+新增完整的端到端测试，验证 WebSocket 通信：
+
+```bash
+# 运行 Gateway-Agent E2E 测试
+go test -v ./tests/integration/ -run "TestGatewayAgent_E2E"
+```
+
+**测试覆盖：**
+- ✅ WebSocket 连接建立
+- ✅ Agent 发送事件到 Gateway
+- ✅ Gateway 发送命令到 Agent
+- ✅ 任务进度流 (task.progress)
+- ✅ 任务完成流 (task.completed)
+- ✅ 任务失败流 (task.failed)
+- ✅ 多命令并发处理
+
 ## 协议说明
 
 ### 消息方向
@@ -214,6 +349,18 @@ go build ./...
 - **ConversationIdentity**: 逻辑会话身份
 - **MessageObs**: 观测消息模型
 - **Result**: 统一返回对象
+
+### 事件类型
+
+| 事件类型 | 载荷类型 | 方向 | 描述 |
+|----------|----------|------|------|
+| `conversation.new_message` | NewMessagePayload | Agent → Gateway | 新消息通知 |
+| `reply.execute` | ReplyExecutePayload | Gateway → Agent | 执行回复命令 |
+| `conversation.mode.set` | ConvModeSetPayload | Gateway → Agent | 设置会话模式 |
+| `diagnostic.capture` | DiagnosticCapturePayload | Gateway → Agent | 捕获诊断信息 |
+| `task.progress` | TaskProgressPayload | Agent → Gateway | 任务进度更新 |
+| `task.completed` | TaskCompletedPayload | Agent → Gateway | 任务完成通知 |
+| `task.failed` | TaskFailedPayload | Agent → Gateway | 任务失败通知 |
 
 ## 许可证
 

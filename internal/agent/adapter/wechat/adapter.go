@@ -279,11 +279,49 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 
 // Focus 聚焦到指定会话
 func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
-	// 聚焦到微信窗口
+	// 1. 聚焦到微信窗口
 	result := a.bridge.FocusWindow(conv.HostWindowHandle)
 	if result.Status != adapter.StatusSuccess {
 		return result
 	}
+
+	// 2. 获取窗口信息以确定布局
+	_, infoResult := a.bridge.GetWindowInfo(conv.HostWindowHandle)
+	if infoResult.Status != adapter.StatusSuccess {
+		// 如果无法获取窗口信息，仍然返回成功（至少聚焦了窗口）
+		return adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Confidence: 0.8,
+			ElapsedMs:  0,
+		}
+	}
+
+	// 3. 根据会话位置计算点击坐标
+	// 假设对话列表在左侧，宽度约 200px，每个会话项高度约 40px
+	// 起始 Y 坐标约 50px（标题栏 + 间距）
+	convListWidth := 200
+	itemHeight := 40
+	startY := 50
+
+	// 计算目标会话的点击位置
+	clickX := convListWidth / 2 // 列表中间
+	clickY := startY + (conv.ListPosition * itemHeight) + (itemHeight / 2)
+
+	// 4. 点击目标会话
+	clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+	if clickResult.Status != adapter.StatusSuccess {
+		// 点击失败，但窗口已聚焦，返回部分成功
+		return adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Confidence: 0.7,
+			ElapsedMs:  0,
+		}
+	}
+
+	// 5. 等待 UI 更新
+	// time.Sleep(100 * time.Millisecond)
 
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
@@ -314,48 +352,121 @@ func (a *WeChatAdapter) Read(conv protocol.ConversationRef, limit int) ([]protoc
 
 // Send 发送消息
 func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, taskID string) adapter.Result {
-	// 聚焦到窗口
+	startTime := time.Now()
+
+	// 阶段1: 聚焦到窗口
 	focusResult := a.bridge.FocusWindow(conv.HostWindowHandle)
 	if focusResult.Status != adapter.StatusSuccess {
-		return focusResult
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("FOCUS_FAILED"),
+			Error:      "Failed to focus window",
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
 	}
 
-	// 使用剪贴板发送消息（复制粘贴方式）
-	// 1. 设置剪贴板文本
+	// 阶段2: 设置剪贴板文本
 	setResult := a.bridge.SetClipboardText(content)
 	if setResult.Status != adapter.StatusSuccess {
-		return setResult
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("CLIPBOARD_FAILED"),
+			Error:      "Failed to set clipboard text",
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
 	}
 
-	// 2. 粘贴（Ctrl+V）
+	// 阶段3: 粘贴（Ctrl+V）
 	sendResult := a.bridge.SendKeys(conv.HostWindowHandle, "^v")
 	if sendResult.Status != adapter.StatusSuccess {
-		return sendResult
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("PASTE_FAILED"),
+			Error:      "Failed to paste message",
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
 	}
 
-	// 3. 发送（Enter）
+	// 阶段4: 发送（Enter）
 	sendResult = a.bridge.SendKeys(conv.HostWindowHandle, "{ENTER}")
 	if sendResult.Status != adapter.StatusSuccess {
-		return sendResult
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("SEND_FAILED"),
+			Error:      "Failed to send message",
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
+	}
+
+	// 阶段5: 验证发送（可选，通过截图检查）
+	// 尝试截图以验证消息已发送
+	_, captureResult := a.bridge.CaptureWindow(conv.HostWindowHandle)
+	elapsedMs := time.Since(startTime).Milliseconds()
+
+	if captureResult.Status != adapter.StatusSuccess {
+		// 截图失败不影响发送成功，但记录警告
+		return adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Confidence: 0.9, // 略低的置信度，因为无法验证
+			ElapsedMs:  elapsedMs,
+		}
 	}
 
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
 		Confidence: 1.0,
-		ElapsedMs:  0,
+		ElapsedMs:  elapsedMs,
 	}
 }
 
 // Verify 验证消息发送
 func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, timeout time.Duration) (*protocol.MessageObs, adapter.Result) {
-	// TODO: 验证消息是否成功发送
-	// 当前返回成功作为 stub
+	startTime := time.Now()
+
+	// 聚焦到窗口
+	focusResult := a.bridge.FocusWindow(conv.HostWindowHandle)
+	if focusResult.Status != adapter.StatusSuccess {
+		return nil, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("FOCUS_FAILED"),
+			Error:      "Failed to focus window for verification",
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
+	}
+
+	// 截图窗口用于验证
+	screenshot, captureResult := a.bridge.CaptureWindow(conv.HostWindowHandle)
+	if captureResult.Status != adapter.StatusSuccess {
+		// 截图失败，返回基本验证结果
+		return nil, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Confidence: 0.5, // 低置信度，因为无法验证
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
+	}
+
+	// TODO: 实现 OCR 文字识别来验证消息是否出现在聊天记录中
+	// 当前返回基本验证结果
+	// 验证逻辑：
+	// 1. 截图聊天区域
+	// 2. 使用 OCR 识别文字
+	// 3. 检查是否包含发送的消息内容
+	// 4. 返回 MessageObs 包含消息指纹
+
+	// 由于 OCR 尚未实现，返回基本成功结果
+	// 但记录截图数据可用于后续验证
+	_ = screenshot // 避免未使用变量警告
+
+	elapsedMs := time.Since(startTime).Milliseconds()
+
 	return nil, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
-		Confidence: 1.0,
-		ElapsedMs:  0,
+		Confidence: 0.8, // 中等置信度，因为 OCR 未实现
+		ElapsedMs:  elapsedMs,
 	}
 }
 

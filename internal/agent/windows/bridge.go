@@ -399,35 +399,402 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 		}
 	}
 
-	// 尝试获取可访问对象
-	_, result := b.GetAccessible(windowHandle)
-	if result.Status != adapter.StatusSuccess {
-		// 如果无法获取 IAccessible，返回基本节点列表而不是错误
-		// 这样可以让适配器继续工作
-	}
-
-	// 创建一个基本的节点列表，包含窗口信息
-	nodes := []AccessibleNode{}
-
 	// 获取窗口信息用于诊断
 	info, infoResult := b.GetWindowInfo(windowHandle)
-	if infoResult.Status == adapter.StatusSuccess {
-		// 添加窗口作为根节点
-		nodes = append(nodes, AccessibleNode{
-			Handle:    windowHandle,
-			Name:      info.Title,
-			Role:      "window",
-			ClassName: info.Class,
-		})
+	if infoResult.Status != adapter.StatusSuccess {
+		// 对于无效句柄，返回空列表而不是错误
+		// 这样可以让适配器继续工作
+		return []AccessibleNode{}, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+		}
 	}
 
-	// 尝试使用 AccessibleChildren 函数获取子节点
-	// 这需要一个 IAccessible* 参数，但我们无法直接传递
-	// 简化实现：返回基本的节点列表
+	// 尝试获取可访问对象
+	pAcc, result := b.GetAccessible(windowHandle)
+	if result.Status != adapter.StatusSuccess {
+		// 如果无法获取 IAccessible，返回基本窗口节点而不是错误
+		// 这样可以让适配器继续工作
+		nodes := []AccessibleNode{
+			{
+				Handle:    windowHandle,
+				Name:      info.Title,
+				Role:      "window",
+				ClassName: info.Class,
+			},
+		}
+		return nodes, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+		}
+	}
 
-	return nodes, adapter.Result{
+	// 创建根节点
+	rootNode := AccessibleNode{
+		Handle:    windowHandle,
+		Name:      info.Title,
+		Role:      "window",
+		ClassName: info.Class,
+	}
+
+	// 递归遍历子节点
+	children := b.enumerateAccessibleChildren(pAcc, 0, 1)
+	rootNode.Children = children
+
+	return []AccessibleNode{rootNode}, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
+	}
+}
+
+// enumerateAccessibleChildren 递归枚举可访问子节点
+func (b *Bridge) enumerateAccessibleChildren(pAcc *IAccessible, childID uintptr, depth int) []AccessibleNode {
+	if depth > 10 { // 限制递归深度，防止无限循环
+		return nil
+	}
+
+	// 获取子节点数量
+	childCount := b.getAccChildCount(pAcc)
+	if childCount == 0 {
+		return nil
+	}
+
+	nodes := []AccessibleNode{}
+
+	// 遍历所有子节点
+	for i := uintptr(1); i <= childCount; i++ {
+		// 获取子对象
+		childAcc, childIDResult := b.getAccChild(pAcc, i)
+		if childIDResult.Status != adapter.StatusSuccess {
+			continue
+		}
+
+		// 获取子节点信息
+		node := b.getAccessibleNodeInfo(childAcc, i)
+		if node.Name != "" || node.Role != "" {
+			// 递归获取子节点的子节点
+			node.Children = b.enumerateAccessibleChildren(childAcc, i, depth+1)
+			nodes = append(nodes, node)
+		}
+	}
+
+	return nodes
+}
+
+// getAccChildCount 获取子节点数量
+func (b *Bridge) getAccChildCount(pAcc *IAccessible) uintptr {
+	if pAcc == nil || pAcc.lpVtbl == nil {
+		return 0
+	}
+
+	vtbl := (*IAccessibleVtbl)(unsafe.Pointer(pAcc.lpVtbl))
+	if vtbl.get_accChildCount == 0 {
+		return 0
+	}
+
+	// 调用 get_accChildCount
+	ret, _, _ := syscall.Syscall(
+		vtbl.get_accChildCount,
+		1,
+		uintptr(unsafe.Pointer(pAcc)),
+		0,
+		0,
+	)
+
+	// 返回值在 eax 中，ret 包含 child count
+	return ret
+}
+
+// getAccChild 获取指定 ID 的子对象
+func (b *Bridge) getAccChild(pAcc *IAccessible, childID uintptr) (*IAccessible, adapter.Result) {
+	if pAcc == nil || pAcc.lpVtbl == nil {
+		return nil, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("INVALID_ACCESSIBLE"),
+		}
+	}
+
+	vtbl := (*IAccessibleVtbl)(unsafe.Pointer(pAcc.lpVtbl))
+	if vtbl.get_accChild == 0 {
+		return nil, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("METHOD_NOT_SUPPORTED"),
+		}
+	}
+
+	// VARIANT 结构用于传递 child ID
+	type VARIANT struct {
+		Vt        uint16
+		Reserved1 uint16
+		Reserved2 uint16
+		Reserved3 uint16
+		Data      [8]byte
+	}
+
+	var variant VARIANT
+	variant.Vt = 3 // VT_I4 (integer)
+	*(*uintptr)(unsafe.Pointer(&variant.Data[0])) = childID
+
+	var pChild *IAccessible
+
+	// 调用 get_accChild
+	ret, _, _ := syscall.Syscall(
+		vtbl.get_accChild,
+		3,
+		uintptr(unsafe.Pointer(pAcc)),
+		uintptr(unsafe.Pointer(&variant)),
+		uintptr(unsafe.Pointer(&pChild)),
+	)
+
+	if ret != 0 || pChild == nil {
+		return nil, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("CHILD_NOT_FOUND"),
+		}
+	}
+
+	return pChild, adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+	}
+}
+
+// getAccessibleNodeInfo 从 IAccessible 对象获取节点信息
+func (b *Bridge) getAccessibleNodeInfo(pAcc *IAccessible, childID uintptr) AccessibleNode {
+	node := AccessibleNode{}
+
+	if pAcc == nil || pAcc.lpVtbl == nil {
+		return node
+	}
+
+	vtbl := (*IAccessibleVtbl)(unsafe.Pointer(pAcc.lpVtbl))
+
+	// 获取名称 (get_accName)
+	if vtbl.get_accName != 0 {
+		var namePtr *uint16
+		type VARIANT struct {
+			Vt        uint16
+			Reserved1 uint16
+			Reserved2 uint16
+			Reserved3 uint16
+			Data      [8]byte
+		}
+		var variant VARIANT
+		variant.Vt = 3 // VT_I4
+		*(*uintptr)(unsafe.Pointer(&variant.Data[0])) = childID
+
+		ret, _, _ := syscall.Syscall(
+			vtbl.get_accName,
+			3,
+			uintptr(unsafe.Pointer(pAcc)),
+			uintptr(unsafe.Pointer(&variant)),
+			uintptr(unsafe.Pointer(&namePtr)),
+		)
+
+		if ret == 0 && namePtr != nil {
+			node.Name = syscall.UTF16ToString((*[1 << 20]uint16)(unsafe.Pointer(namePtr))[:])
+			// 释放 BSTR
+			modole32 := syscall.NewLazyDLL("ole32.dll")
+			procSysFreeString := modole32.NewProc("SysFreeString")
+			procSysFreeString.Call(uintptr(unsafe.Pointer(namePtr)))
+		}
+	}
+
+	// 获取角色 (get_accRole)
+	if vtbl.get_accRole != 0 {
+		type VARIANT struct {
+			Vt        uint16
+			Reserved1 uint16
+			Reserved2 uint16
+			Reserved3 uint16
+			Data      [8]byte
+		}
+		var variant VARIANT
+		variant.Vt = 3 // VT_I4
+		*(*uintptr)(unsafe.Pointer(&variant.Data[0])) = childID
+
+		var roleVariant VARIANT
+		ret, _, _ := syscall.Syscall(
+			vtbl.get_accRole,
+			3,
+			uintptr(unsafe.Pointer(pAcc)),
+			uintptr(unsafe.Pointer(&variant)),
+			uintptr(unsafe.Pointer(&roleVariant)),
+		)
+
+		if ret == 0 && roleVariant.Vt == 3 {
+			roleValue := *(*uintptr)(unsafe.Pointer(&roleVariant.Data[0]))
+			node.Role = b.getRoleString(roleValue)
+		}
+	}
+
+	// 获取类名 (通过 get_accClassName 或其他方式)
+	// IAccessible 没有直接的 get_accClassName，需要从其他属性推断
+	node.ClassName = ""
+
+	// 获取位置信息 (accLocation)
+	if vtbl.accLocation != 0 {
+		type VARIANT struct {
+			Vt        uint16
+			Reserved1 uint16
+			Reserved2 uint16
+			Reserved3 uint16
+			Data      [8]byte
+		}
+		var variant VARIANT
+		variant.Vt = 3 // VT_I4
+		*(*uintptr)(unsafe.Pointer(&variant.Data[0])) = childID
+
+		var left, top, width, height int32
+		ret, _, _ := syscall.Syscall6(
+			vtbl.accLocation,
+			6,
+			uintptr(unsafe.Pointer(pAcc)),
+			uintptr(unsafe.Pointer(&left)),
+			uintptr(unsafe.Pointer(&top)),
+			uintptr(unsafe.Pointer(&width)),
+			uintptr(unsafe.Pointer(&height)),
+			uintptr(unsafe.Pointer(&variant)),
+		)
+
+		if ret == 0 {
+			node.Bounds = [4]int{int(left), int(top), int(width), int(height)}
+		}
+	}
+
+	return node
+}
+
+// getRoleString 将角色值转换为字符串
+func (b *Bridge) getRoleString(roleValue uintptr) string {
+	// 参考: https://docs.microsoft.com/en-us/windows/win32/winauto/object-roles
+	switch roleValue {
+	case 1:
+		return "titlebar"
+	case 2:
+		return "menubar"
+	case 3:
+		return "scrollbar"
+	case 4:
+		return "grip"
+	case 5:
+		return "sound"
+	case 6:
+		return "cursor"
+	case 7:
+		return "caret"
+	case 8:
+		return "alert"
+	case 9:
+		return "window"
+	case 10:
+		return "client"
+	case 11:
+		return "popupmenu"
+	case 12:
+		return "menuitem"
+	case 13:
+		return "tooltip"
+	case 14:
+		return "application"
+	case 15:
+		return "document"
+	case 16:
+		return "pane"
+	case 17:
+		return "chart"
+	case 18:
+		return "dialog"
+	case 19:
+		return "border"
+	case 20:
+		return "grouping"
+	case 21:
+		return "separator"
+	case 22:
+		return "toolbar"
+	case 23:
+		return "statusbar"
+	case 24:
+		return "table"
+	case 25:
+		return "columnheader"
+	case 26:
+		return "rowheader"
+	case 27:
+		return "row"
+	case 28:
+		return "column"
+	case 29:
+		return "cell"
+	case 30:
+		return "link"
+	case 31:
+		return "helpballoon"
+	case 32:
+		return "character"
+	case 33:
+		return "list"
+	case 34:
+		return "listitem"
+	case 35:
+		return "outline"
+	case 36:
+		return "outlineitem"
+	case 37:
+		return "pagetab"
+	case 38:
+		return "propertypage"
+	case 39:
+		return "indicator"
+	case 40:
+		return "graphic"
+	case 41:
+		return "statictext"
+	case 42:
+		return "text"
+	case 43:
+		return "pushbutton"
+	case 44:
+		return "checkbutton"
+	case 45:
+		return "radiobutton"
+	case 46:
+		return "combobox"
+	case 47:
+		return "dropdownlist"
+	case 48:
+		return "progressbar"
+	case 49:
+		return "slider"
+	case 50:
+		return "spinbutton"
+	case 51:
+		return "diagram"
+	case 52:
+		return "animation"
+	case 53:
+		return "equation"
+	case 54:
+		return "buttondropdown"
+	case 55:
+		return "buttonmenu"
+	case 56:
+		return "buttondropdowngrid"
+	case 57:
+		return "whitespace"
+	case 58:
+		return "pagetablist"
+	case 59:
+		return "clock"
+	case 60:
+		return "splitbutton"
+	case 61:
+		return "ipaddress"
+	case 62:
+		return "outlinebutton"
+	default:
+		return "unknown"
 	}
 }
 

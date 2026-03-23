@@ -577,19 +577,19 @@ func TestWeChatAdapter_Scan_WithPlaceholder(t *testing.T) {
 	conversations, result := wechatAdapter.Scan(instance)
 
 	if result.Status != adapter.StatusSuccess {
-		t.Errorf("Scan should succeed even with placeholder, got status: %v", result.Status)
+		t.Errorf("Scan should succeed even when no conversations found, got status: %v", result.Status)
 	}
 
-	if len(conversations) != 1 {
-		t.Errorf("Expected 1 placeholder conversation, got %d", len(conversations))
+	// 当无法枚举节点时，返回空列表而不是占位会话
+	if len(conversations) != 0 {
+		t.Errorf("Expected 0 conversations when enumerate fails, got %d", len(conversations))
 	}
 
-	if len(conversations) > 0 {
-		if conversations[0].DisplayName != "Placeholder Conversation" {
-			t.Errorf("Expected placeholder name, got '%s'", conversations[0].DisplayName)
-		}
-		if conversations[0].HostWindowHandle != 12345 {
-			t.Errorf("Expected HostWindowHandle 12345, got %d", conversations[0].HostWindowHandle)
+	// 验证诊断信息中标记为 placeholder
+	if len(result.Diagnostics) > 0 {
+		diag := result.Diagnostics[0]
+		if diag.Context["implementation"] != "placeholder" {
+			t.Errorf("Expected implementation to be 'placeholder', got '%s'", diag.Context["implementation"])
 		}
 	}
 }

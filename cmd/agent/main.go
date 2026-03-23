@@ -127,25 +127,29 @@ func handleReplyExecute(
 		return
 	}
 
-	// 查找会话
-	convID := payload.ConversationID
-	// 简化实现：使用第一个检测到的实例和会话
+	// 阶段1: 检测应用实例
+	sendProgress(client, env.TaskID, 0.1, "检测应用实例中...", "detecting")
 	instances, detectResult := chatAdapter.Detect()
 	if detectResult.Status != adapter.StatusSuccess || len(instances) == 0 {
 		log.Printf("未找到应用实例: %s", detectResult.Error)
 		sendTaskFailed(client, env.TaskID, "NO_INSTANCE", "未找到应用实例")
 		return
 	}
+	log.Printf("检测到 %d 个应用实例", len(instances))
 
-	// 扫描会话列表
+	// 阶段2: 扫描会话列表
+	sendProgress(client, env.TaskID, 0.3, "扫描会话列表中...", "scanning")
 	conversations, scanResult := chatAdapter.Scan(instances[0])
 	if scanResult.Status != adapter.StatusSuccess {
 		log.Printf("扫描会话失败: %s", scanResult.Error)
 		sendTaskFailed(client, env.TaskID, "SCAN_FAILED", "扫描会话失败")
 		return
 	}
+	log.Printf("扫描到 %d 个会话", len(conversations))
 
-	// 查找目标会话
+	// 阶段3: 查找目标会话
+	sendProgress(client, env.TaskID, 0.5, "查找目标会话中...", "finding")
+	convID := payload.ConversationID
 	var targetConv *protocol.ConversationRef
 	for i := range conversations {
 		if conversations[i].DisplayName == convID || conversations[i].HostWindowHandle != 0 {
@@ -158,35 +162,44 @@ func handleReplyExecute(
 		// 如果找不到精确匹配，使用第一个会话
 		if len(conversations) > 0 {
 			targetConv = &conversations[0]
+			log.Printf("未找到精确匹配的会话 '%s'，使用第一个会话: %s", convID, targetConv.DisplayName)
 		} else {
 			log.Printf("未找到会话: %s", convID)
 			sendTaskFailed(client, env.TaskID, "CONV_NOT_FOUND", "未找到会话")
 			return
 		}
 	}
+	log.Printf("目标会话: %s", targetConv.DisplayName)
 
-	// 聚焦到会话
+	// 阶段4: 聚焦到会话
+	sendProgress(client, env.TaskID, 0.7, "切换到目标会话...", "focusing")
 	focusResult := chatAdapter.Focus(*targetConv)
 	if focusResult.Status != adapter.StatusSuccess {
 		log.Printf("聚焦会话失败: %s", focusResult.Error)
 		sendTaskFailed(client, env.TaskID, "FOCUS_FAILED", "聚焦会话失败")
 		return
 	}
+	log.Printf("成功切换到会话: %s (置信度: %.2f)", targetConv.DisplayName, focusResult.Confidence)
 
-	// 发送消息
+	// 阶段5: 发送消息
+	sendProgress(client, env.TaskID, 0.85, "发送消息中...", "sending")
 	sendResult := chatAdapter.Send(*targetConv, payload.ReplyContent, env.TaskID)
 	if sendResult.Status != adapter.StatusSuccess {
 		log.Printf("发送消息失败: %s", sendResult.Error)
 		sendTaskFailed(client, env.TaskID, "SEND_FAILED", sendResult.Error)
 		return
 	}
+	log.Printf("消息发送成功 (耗时: %dms, 置信度: %.2f)", sendResult.ElapsedMs, sendResult.Confidence)
 
-	// 验证消息
+	// 阶段6: 验证消息
+	sendProgress(client, env.TaskID, 0.95, "验证消息发送中...", "verifying")
 	time.Sleep(500 * time.Millisecond) // 等待消息发送
 	msgObs, verifyResult := chatAdapter.Verify(*targetConv, payload.ReplyContent, 3*time.Second)
 	if verifyResult.Status != adapter.StatusSuccess {
 		log.Printf("验证消息失败: %s", verifyResult.Error)
 		// 即使验证失败，也标记任务完成（发送成功）
+	} else {
+		log.Printf("消息验证成功 (置信度: %.2f)", verifyResult.Confidence)
 	}
 
 	// 标记任务已处理
@@ -349,5 +362,35 @@ func sendTaskFailed(client *comm.WebSocketClient, taskID, errorCode, errorReason
 		log.Printf("发送失败事件失败: %v", err)
 	} else {
 		log.Printf("任务失败: task_id=%s, error=%s", taskID, errorCode)
+	}
+}
+
+// sendProgress 发送任务进度事件
+func sendProgress(client *comm.WebSocketClient, taskID string, progress float64, message, stage string) {
+	payload := protocol.TaskProgressPayload{
+		TaskID:   taskID,
+		Progress: progress,
+		Message:  message,
+		Stage:    stage,
+	}
+
+	env, err := protocol.NewEnvelope(
+		protocol.KindEvent,
+		protocol.PayloadTaskProgress,
+		payload,
+	)
+	if err != nil {
+		log.Printf("创建进度事件失败: %v", err)
+		return
+	}
+
+	env.DeviceID = client.DeviceID()
+	env.TenantID = client.TenantID()
+	env.TaskID = taskID
+
+	if err := client.Send(env); err != nil {
+		log.Printf("发送进度事件失败: %v", err)
+	} else {
+		log.Printf("任务进度: task_id=%s, progress=%.2f, stage=%s", taskID, progress, stage)
 	}
 }
