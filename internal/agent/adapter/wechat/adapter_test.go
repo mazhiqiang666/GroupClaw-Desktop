@@ -260,13 +260,23 @@ func TestWeChatAdapter_Detect(t *testing.T) {
 
 func TestWeChatAdapter_Detect_NoWindow(t *testing.T) {
 	mock := newMockBridge()
-	mock.findResult = []uintptr{} // 没有找到窗口
+	mock.findResult = []uintptr{} // No windows found
 	wechatAdapter := NewWeChatAdapterWithBridge(mock)
 
 	instances, result := wechatAdapter.Detect()
 
+	// Tightened assertions - when no windows found, returns success with NO_WECHAT_WINDOW
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Detect should succeed even with no windows, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonCode("NO_WECHAT_WINDOW") {
+		t.Errorf("Expected ReasonCode NO_WECHAT_WINDOW, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 0.0 {
+		t.Errorf("Expected Confidence 0.0 when no windows found, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
 	}
 
 	if len(instances) != 0 {
@@ -281,12 +291,29 @@ func TestWeChatAdapter_Detect_MultipleWindows(t *testing.T) {
 
 	instances, result := wechatAdapter.Detect()
 
+	// Tightened assertions
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Detect should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
 	}
 
 	if len(instances) != 2 {
 		t.Errorf("Expected 2 instances, got %d", len(instances))
+	}
+
+	// Verify both instances have correct app ID
+	for i, inst := range instances {
+		if inst.AppID != "wechat" {
+			t.Errorf("Instance %d: expected AppID 'wechat', got '%s'", i, inst.AppID)
+		}
 	}
 }
 
@@ -301,8 +328,15 @@ func TestWeChatAdapter_Detect_BridgeError(t *testing.T) {
 
 	instances, result := wechatAdapter.Detect()
 
+	// Adapter returns WINDOW_NOT_FOUND when bridge fails (not BRIDGE_ERROR)
 	if result.Status != adapter.StatusFailed {
 		t.Errorf("Detect should fail when bridge fails, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonCode("WINDOW_NOT_FOUND") {
+		t.Errorf("Expected ReasonCode WINDOW_NOT_FOUND, got %v", result.ReasonCode)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
 	}
 
 	if instances != nil {
@@ -362,7 +396,7 @@ func TestWeChatAdapter_Scan(t *testing.T) {
 
 func TestWeChatAdapter_Scan_NoWindow(t *testing.T) {
 	mock := newMockBridge()
-	mock.findResult = []uintptr{} // 没有找到窗口
+	mock.findResult = []uintptr{} // No windows found
 	wechatAdapter := NewWeChatAdapterWithBridge(mock)
 
 	instance := protocol.AppInstanceRef{
@@ -372,8 +406,22 @@ func TestWeChatAdapter_Scan_NoWindow(t *testing.T) {
 
 	conversations, result := wechatAdapter.Scan(instance)
 
+	// Adapter returns NO_CONVERSATIONS with Confidence 0.0 when no windows found
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Scan should succeed even with no windows, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonCode("NO_CONVERSATIONS") {
+		t.Errorf("Expected ReasonCode NO_CONVERSATIONS, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 0.0 {
+		t.Errorf("Expected Confidence 0.0 when no windows found, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	// When no windows found, adapter returns NO_CONVERSATIONS without diagnostics
+	if len(result.Diagnostics) != 0 {
+		t.Errorf("Expected 0 diagnostic entries when no windows found, got %d", len(result.Diagnostics))
 	}
 
 	if len(conversations) != 0 {
@@ -397,8 +445,15 @@ func TestWeChatAdapter_Scan_BridgeError(t *testing.T) {
 
 	conversations, result := wechatAdapter.Scan(instance)
 
+	// Adapter returns WINDOW_NOT_FOUND when bridge fails (not BRIDGE_ERROR)
 	if result.Status != adapter.StatusFailed {
 		t.Errorf("Scan should fail when bridge fails, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonCode("WINDOW_NOT_FOUND") {
+		t.Errorf("Expected ReasonCode WINDOW_NOT_FOUND, got %v", result.ReasonCode)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
 	}
 
 	if conversations != nil {
@@ -554,6 +609,18 @@ func TestWeChatAdapter_Verify_EmptyContent(t *testing.T) {
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Verify should succeed even with empty content, got status: %v", result.Status)
 	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence <= 0 || result.Confidence > 1.0 {
+		t.Errorf("Expected Confidence between 0 and 1, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Errorf("Expected 1 diagnostic entry, got %d", len(result.Diagnostics))
+	}
 }
 
 func TestWeChatAdapter_Verify_ZeroTimeout(t *testing.T) {
@@ -568,6 +635,18 @@ func TestWeChatAdapter_Verify_ZeroTimeout(t *testing.T) {
 
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Verify should succeed even with zero timeout, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence <= 0 || result.Confidence > 1.0 {
+		t.Errorf("Expected Confidence between 0 and 1, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Errorf("Expected 1 diagnostic entry, got %d", len(result.Diagnostics))
 	}
 
 	if msg != nil {
@@ -635,6 +714,18 @@ func TestWeChatAdapter_Detect_WithClassVerification(t *testing.T) {
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Detect should succeed, got status: %v", result.Status)
 	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) > 0 {
+		t.Errorf("Expected no diagnostics for Detect, got %d", len(result.Diagnostics))
+	}
 
 	if len(instances) != 1 {
 		t.Errorf("Expected 1 instance, got %d", len(instances))
@@ -659,9 +750,21 @@ func TestWeChatAdapter_Detect_NonWeChatWindow(t *testing.T) {
 
 	instances, result := wechatAdapter.Detect()
 
-	// Should return empty list when window is not WeChat
+	// When window is found but doesn't match WeChat class/title, returns NO_WECHAT_WINDOW with Confidence 0.0
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Detect should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonCode("NO_WECHAT_WINDOW") {
+		t.Errorf("Expected ReasonCode NO_WECHAT_WINDOW, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 0.0 {
+		t.Errorf("Expected Confidence 0.0 for non-WeChat window, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) > 0 {
+		t.Errorf("Expected no diagnostics for Detect, got %d", len(result.Diagnostics))
 	}
 
 	if len(instances) != 0 {
@@ -680,6 +783,18 @@ func TestWeChatAdapter_Detect_FallbackToClassName(t *testing.T) {
 
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Detect should succeed, got status: %v", result.Status)
+	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) > 0 {
+		t.Errorf("Expected no diagnostics for Detect, got %d", len(result.Diagnostics))
 	}
 
 	if len(instances) != 1 {
@@ -703,16 +818,26 @@ func TestWeChatAdapter_Scan_WithPlaceholder(t *testing.T) {
 
 	conversations, result := wechatAdapter.Scan(instance)
 
+	// When node enumeration fails, returns NO_CONVERSATIONS with Confidence 0.0
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Scan should succeed even when no conversations found, got status: %v", result.Status)
 	}
+	if result.ReasonCode != adapter.ReasonCode("NO_CONVERSATIONS") {
+		t.Errorf("Expected ReasonCode NO_CONVERSATIONS, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 0.0 {
+		t.Errorf("Expected Confidence 0.0 when enumerate fails, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
 
-	// 当无法枚举节点时，返回空列表而不是占位会话
+	// When node enumeration fails, returns empty list instead of placeholder conversation
 	if len(conversations) != 0 {
 		t.Errorf("Expected 0 conversations when enumerate fails, got %d", len(conversations))
 	}
 
-	// 验证诊断信息包含基本上下文
+	// Verify diagnostics contain basic context
 	if len(result.Diagnostics) > 0 {
 		diag := result.Diagnostics[0]
 		if diag.Context["window_handle"] == "" {
@@ -740,6 +865,18 @@ func TestWeChatAdapter_Scan_WithRealNodes(t *testing.T) {
 	if result.Status != adapter.StatusSuccess {
 		t.Errorf("Scan should succeed, got status: %v", result.Status)
 	}
+	if result.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", result.ReasonCode)
+	}
+	if result.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", result.Confidence)
+	}
+	if result.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", result.ElapsedMs)
+	}
+	if len(result.Diagnostics) != 1 {
+		t.Errorf("Expected 1 diagnostic entry, got %d", len(result.Diagnostics))
+	}
 
 	if len(conversations) != 2 {
 		t.Errorf("Expected 2 conversations from real nodes, got %d", len(conversations))
@@ -764,6 +901,15 @@ func TestWeChatAdapter_Integration_DetectAndScan(t *testing.T) {
 	if detectResult.Status != adapter.StatusSuccess {
 		t.Errorf("Detect should succeed, got status: %v", detectResult.Status)
 	}
+	if detectResult.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", detectResult.ReasonCode)
+	}
+	if detectResult.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", detectResult.Confidence)
+	}
+	if detectResult.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", detectResult.ElapsedMs)
+	}
 
 	if len(instances) == 0 {
 		t.Error("Detect should find at least one instance")
@@ -774,6 +920,15 @@ func TestWeChatAdapter_Integration_DetectAndScan(t *testing.T) {
 	conversations, scanResult := wechatAdapter.Scan(instances[0])
 	if scanResult.Status != adapter.StatusSuccess {
 		t.Errorf("Scan should succeed, got status: %v", scanResult.Status)
+	}
+	if scanResult.ReasonCode != adapter.ReasonOK {
+		t.Errorf("Expected ReasonCode OK, got %v", scanResult.ReasonCode)
+	}
+	if scanResult.Confidence != 1.0 {
+		t.Errorf("Expected Confidence 1.0, got %f", scanResult.Confidence)
+	}
+	if scanResult.ElapsedMs < 0 {
+		t.Errorf("Expected non-negative ElapsedMs, got %d", scanResult.ElapsedMs)
 	}
 
 	if len(conversations) == 0 {

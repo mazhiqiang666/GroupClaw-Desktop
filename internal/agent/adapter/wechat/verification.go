@@ -145,8 +145,9 @@ func (ps *PathSystem) FlattenNodesWithPath(
 	depth int,
 	maxDepth int,
 ) []windows.AccessibleNode {
+	// Stop if we've reached the maximum depth
 	if depth >= maxDepth {
-		return nodes
+		return nil
 	}
 
 	result := make([]windows.AccessibleNode, 0, len(nodes))

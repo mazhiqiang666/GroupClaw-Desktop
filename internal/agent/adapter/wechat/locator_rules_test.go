@@ -866,3 +866,360 @@ func TestConvertFocusEvidenceToDiagnostics_DirtyData(t *testing.T) {
 		})
 	}
 }
+
+// ==================== Complex Mock Data Scenarios ====================
+
+func TestSessionCandidateRules_ComplexScenarios(t *testing.T) {
+	rules := NewSessionCandidateRules()
+
+	// Realistic WeChat contact list scenario with various edge cases
+	nodes := []windows.AccessibleNode{
+		// Valid contacts in left panel
+		{Name: "张三", Role: "list item", Bounds: [4]int{50, 100, 150, 40}},
+		{Name: "李四", Role: "list item", Bounds: [4]int{50, 150, 150, 40}},
+		{Name: "王五", Role: "list item", Bounds: [4]int{50, 200, 150, 40}},
+		{Name: "赵六", Role: "list item", Bounds: [4]int{50, 250, 150, 40}},
+		{Name: "钱七", Role: "list item", Bounds: [4]int{50, 300, 150, 40}},
+		// Invalid - too far right
+		{Name: "Right Panel", Role: "list item", Bounds: [4]int{400, 100, 150, 40}},
+		// Invalid - wrong role
+		{Name: "Header", Role: "text", Bounds: [4]int{50, 50, 150, 30}},
+		// Invalid - empty name
+		{Name: "", Role: "list item", Bounds: [4]int{50, 350, 150, 40}},
+		// Invalid - zero width
+		{Name: "Invalid", Role: "list item", Bounds: [4]int{50, 400, 0, 40}},
+	}
+
+	candidates := rules.FilterCandidateConversations(nodes, 800)
+
+	if len(candidates) != 5 {
+		t.Errorf("Expected 5 candidates, got %d", len(candidates))
+	}
+
+	// Verify all candidates are valid
+	for i, node := range candidates {
+		if node.Name == "" {
+			t.Errorf("Candidate %d has empty name", i)
+		}
+		if node.Role != "list item" && node.Role != "ListItem" {
+			t.Errorf("Candidate %d has invalid role: %s", i, node.Role)
+		}
+		if node.Bounds[0] > 266 { // 800/3 = 266
+			t.Errorf("Candidate %d is outside left panel: x=%d", i, node.Bounds[0])
+		}
+	}
+}
+
+func TestPositioningStrategyRules_ComplexScenarios(t *testing.T) {
+	pathSystem := NewPathSystem()
+	rules := NewPositioningStrategyRules(pathSystem)
+
+	// Complex tree structure with same-name contacts
+	nodes := []windows.AccessibleNode{
+		{Name: "张三", Role: "list item", Bounds: [4]int{50, 100, 150, 40}, TreePath: "[0]"},
+		{Name: "张三", Role: "list item", Bounds: [4]int{50, 150, 150, 40}, TreePath: "[1]"},
+		{Name: "李四", Role: "list item", Bounds: [4]int{50, 200, 150, 40}, TreePath: "[2]"},
+		{Name: "王五", Role: "list item", Bounds: [4]int{50, 250, 150, 40}, TreePath: "[3]"},
+	}
+
+	tests := []struct {
+		name        string
+		conv        protocol.ConversationRef
+		expectFound bool
+		expectName  string
+		expectSrc   string
+	}{
+		{
+			name: "Tree path + name match (first 张三)",
+			conv: protocol.ConversationRef{
+				DisplayName:         "张三",
+				ListNeighborhoodHint: []string{"[0]", "bounds:50_100_150_40"},
+			},
+			expectFound: true,
+			expectName:  "张三",
+			expectSrc:   "tree_path_name",
+		},
+		{
+			name: "Tree path + name match (second 张三)",
+			conv: protocol.ConversationRef{
+				DisplayName:         "张三",
+				ListNeighborhoodHint: []string{"[1]", "bounds:50_150_150_40"},
+			},
+			expectFound: true,
+			expectName:  "张三",
+			expectSrc:   "tree_path_name",
+		},
+		{
+			name: "Bounds match fallback",
+			conv: protocol.ConversationRef{
+				DisplayName:         "李四",
+				ListNeighborhoodHint: []string{"[99]", "bounds:50_200_150_40"},
+			},
+			expectFound: true,
+			expectName:  "李四",
+			expectSrc:   "bounds_match",
+		},
+		{
+			name: "Name match only fallback",
+			conv: protocol.ConversationRef{
+				DisplayName: "王五",
+			},
+			expectFound: true,
+			expectName:  "王五",
+			expectSrc:   "name_match",
+		},
+		{
+			name: "No match - different name",
+			conv: protocol.ConversationRef{
+				DisplayName: "不存在的人",
+			},
+			expectFound: false,
+			expectSrc:   "not_found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := rules.FindNodeByStrategy(nodes, tt.conv)
+
+			if tt.expectFound {
+				if result.Node == nil {
+					t.Errorf("Expected to find node, got nil")
+				} else if result.Node.Name != tt.expectName {
+					t.Errorf("Expected name '%s', got '%s'", tt.expectName, result.Node.Name)
+				}
+			} else {
+				if result.Node != nil {
+					t.Errorf("Expected no match, got node with name '%s'", result.Node.Name)
+				}
+			}
+
+			if result.Source != tt.expectSrc {
+				t.Errorf("Expected source '%s', got '%s'", tt.expectSrc, result.Source)
+			}
+		})
+	}
+}
+
+func TestActivationVerificationRules_ComplexScenarios(t *testing.T) {
+	pathSystem := NewPathSystem()
+	evidenceCollector := NewEvidenceCollector()
+	rules := NewActivationVerificationRules(pathSystem, evidenceCollector)
+
+	conv := protocol.ConversationRef{DisplayName: "张三"}
+
+	// Complex scenario: multiple panels with different states
+	tests := []struct {
+		name          string
+		currentNodes  []windows.AccessibleNode
+		originalNodes []windows.AccessibleNode
+		expectExists  bool
+		expectActive  bool
+		expectTitle   bool
+		expectPanel   bool
+	}{
+		{
+			name: "Full activation with all evidence",
+			currentNodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{50, 100, 150, 40}},
+				{Name: "张三", Role: "text", Bounds: [4]int{50, 10, 300, 25}}, // Title
+				{Name: "消息区域", Role: "text", Bounds: [4]int{300, 200, 200, 50}},
+			},
+			originalNodes: []windows.AccessibleNode{
+				{Name: "李四", Role: "list item", Bounds: [4]int{50, 100, 150, 40}},
+				{Name: "王五", Role: "list item", Bounds: [4]int{50, 150, 150, 40}},
+			},
+			expectExists:  true,
+			expectActive:  true,
+			expectTitle:   true,
+			expectPanel:   true,
+		},
+		{
+			name: "Node exists but not in active position",
+			currentNodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{300, 100, 150, 40}},
+			},
+			originalNodes: []windows.AccessibleNode{},
+			expectExists:  true,
+			expectActive:  false,
+			expectTitle:   false,
+			expectPanel:   false,
+		},
+		{
+			name: "Same node count (no panel switch)",
+			currentNodes: []windows.AccessibleNode{
+				{Name: "张三", Role: "list item", Bounds: [4]int{50, 100, 150, 40}},
+			},
+			originalNodes: []windows.AccessibleNode{
+				{Name: "李四", Role: "list item", Bounds: [4]int{50, 100, 150, 40}},
+			},
+			expectExists:  true,
+			expectActive:  true,
+			expectTitle:   false,
+			expectPanel:   false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			evidence := rules.VerifySessionActivation(conv, tt.currentNodes, tt.originalNodes, "test")
+
+			if evidence.NodeStillExists != tt.expectExists {
+				t.Errorf("NodeStillExists = %v, want %v", evidence.NodeStillExists, tt.expectExists)
+			}
+			if evidence.NodeHasActiveState != tt.expectActive {
+				t.Errorf("NodeHasActiveState = %v, want %v", evidence.NodeHasActiveState, tt.expectActive)
+			}
+			if evidence.TitleContainsTarget != tt.expectTitle {
+				t.Errorf("TitleContainsTarget = %v, want %v", evidence.TitleContainsTarget, tt.expectTitle)
+			}
+			if evidence.PanelSwitchDetected != tt.expectPanel {
+				t.Errorf("PanelSwitchDetected = %v, want %v", evidence.PanelSwitchDetected, tt.expectPanel)
+			}
+		})
+	}
+}
+
+func TestMessageVerificationRules_ComplexScenarios(t *testing.T) {
+	pathSystem := NewPathSystem()
+	messageClassifier := NewMessageClassifier()
+	evidenceCollector := NewEvidenceCollector()
+	rules := NewMessageVerificationRules(pathSystem, messageClassifier, evidenceCollector)
+
+	// Realistic chat scenario
+	beforeNodes := []windows.AccessibleNode{
+		{Name: "Old message 1", Role: "text", Bounds: [4]int{200, 100, 200, 30}},
+		{Name: "Old message 2", Role: "text", Bounds: [4]int{200, 140, 200, 30}},
+	}
+
+	afterNodes := []windows.AccessibleNode{
+		{Name: "Old message 1", Role: "text", Bounds: [4]int{200, 100, 200, 30}},
+		{Name: "Old message 2", Role: "text", Bounds: [4]int{200, 140, 200, 30}},
+		{Name: "New message", Role: "text", Bounds: [4]int{200, 180, 200, 30}},
+	}
+
+	beforeScreenshot := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}
+	afterScreenshot := []byte{1, 2, 3, 4, 5, 6, 7, 8, 9, 11} // One byte different
+	chatAreaBounds := [4]int{200, 100, 200, 100}
+	content := "New message"
+
+	evidence := rules.VerifyMessageSend(
+		beforeNodes, afterNodes,
+		beforeScreenshot, afterScreenshot,
+		chatAreaBounds, content,
+	)
+
+	// Verify all evidence points
+	if evidence.NewMessageNodes != 1 {
+		t.Errorf("Expected 1 new message node, got %d", evidence.NewMessageNodes)
+	}
+	if !evidence.MessageNodeAdded {
+		t.Error("Expected MessageNodeAdded to be true")
+	}
+	if !evidence.MessageContentMatch {
+		t.Error("Expected MessageContentMatch to be true")
+	}
+	if !evidence.ScreenshotChanged {
+		t.Error("Expected ScreenshotChanged to be true")
+	}
+	if evidence.Confidence < 0.5 {
+		t.Errorf("Expected confidence >= 0.5, got %f", evidence.Confidence)
+	}
+}
+
+func TestDeliveryAssessmentRules_ComplexScenarios(t *testing.T) {
+	rules := NewDeliveryAssessmentRules()
+
+	tests := []struct {
+		name                string
+		focusEvidence       FocusVerificationEvidence
+		messageEvidence     SendVerificationEvidence
+		expectedState       string
+		expectedMinConf     float64
+		expectedMaxConf     float64
+	}{
+		{
+			name: "Perfect verification",
+			focusEvidence: FocusVerificationEvidence{
+				NodeStillExists:    true,
+				NodeHasActiveState: true,
+				TitleContainsTarget: true,
+				PanelSwitchDetected: false,
+				MessageAreaVisible: true,
+				Confidence:         1.0,
+				EvidenceCount:      4,
+			},
+			messageEvidence: SendVerificationEvidence{
+				NewMessageNodes:   1,
+				MessageNodeAdded:  true,
+				MessageContentMatch: true,
+				ScreenshotChanged: true,
+				ChatAreaDiff:      0.05,
+				Confidence:        1.0,
+			},
+			expectedState:   "verified",
+			expectedMinConf: 0.8,
+			expectedMaxConf: 1.0,
+		},
+		{
+			name: "Partial verification",
+			focusEvidence: FocusVerificationEvidence{
+				NodeStillExists:    true,
+				NodeHasActiveState: false,
+				TitleContainsTarget: false,
+				PanelSwitchDetected: false,
+				MessageAreaVisible: false,
+				Confidence:         0.4,
+				EvidenceCount:      1,
+			},
+			messageEvidence: SendVerificationEvidence{
+				NewMessageNodes:   1,
+				MessageNodeAdded:  true,
+				MessageContentMatch: false,
+				ScreenshotChanged: false,
+				ChatAreaDiff:      0.0,
+				Confidence:        0.4,
+			},
+			expectedState:   "unknown",
+			expectedMinConf: 0.0,
+			expectedMaxConf: 0.5,
+		},
+		{
+			name: "Sent but unverified",
+			focusEvidence: FocusVerificationEvidence{
+				NodeStillExists:    true,
+				NodeHasActiveState: true,
+				TitleContainsTarget: false,
+				PanelSwitchDetected: false,
+				MessageAreaVisible: true,
+				Confidence:         0.6,
+				EvidenceCount:      3,
+			},
+			messageEvidence: SendVerificationEvidence{
+				NewMessageNodes:   1,
+				MessageNodeAdded:  true,
+				MessageContentMatch: true,
+				ScreenshotChanged: true,
+				ChatAreaDiff:      0.02,
+				Confidence:        0.6,
+			},
+			expectedState:   "sent_unverified",
+			expectedMinConf: 0.5,
+			expectedMaxConf: 0.8,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assessment := rules.AssessDeliveryState(tt.focusEvidence, tt.messageEvidence)
+
+			if assessment.State != tt.expectedState {
+				t.Errorf("Expected state '%s', got '%s'", tt.expectedState, assessment.State)
+			}
+			if assessment.Confidence < tt.expectedMinConf || assessment.Confidence > tt.expectedMaxConf {
+				t.Errorf("Confidence %f not in expected range [%f, %f]",
+					assessment.Confidence, tt.expectedMinConf, tt.expectedMaxConf)
+			}
+		})
+	}
+}
