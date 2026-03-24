@@ -161,6 +161,15 @@ func main() {
 			lang = args[2]
 		}
 		debugOCR(bridge, uintptr(handle), lang)
+	case "debug-vision":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-vision <window-handle>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		debugVision(bridge, uintptr(handle))
 	default:
 		printUsage()
 	}
@@ -183,6 +192,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump debug-uia <handle> [N]   - Debug: First N UIA nodes")
 	fmt.Println("  bridge-dump debug-ocr <handle> [lang] - Debug: OCR text extraction")
 	fmt.Println("                                         Use --split-regions for region-based OCR")
+	fmt.Println("  bridge-dump debug-vision <handle>     - Debug: Visual conversation detection")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
@@ -1241,5 +1251,150 @@ func debugOCR(bridge windows.BridgeInterface, handle uintptr, lang string) {
 	}
 
 	fmt.Println("=== Debug OCR Complete ===")
+}
+
+func debugVision(bridge windows.BridgeInterface, handle uintptr) {
+	fmt.Printf("=== Debug: Vision Detection for Handle: 0x%X (%d) ===\n\n", handle, handle)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	fmt.Printf("Window Information:\n")
+	fmt.Printf("  Handle: 0x%X (%d)\n", handle, handle)
+	fmt.Printf("  Class: %s\n", info.Class)
+	fmt.Printf("  Title: %s\n", info.Title)
+	fmt.Println()
+
+	// 类型断言以访问视觉检测方法
+	winBridge, ok := bridge.(*windows.Bridge)
+	if !ok {
+		fmt.Printf("ERROR: Failed to cast bridge to *windows.Bridge\n")
+		fmt.Printf("Bridge type: %T\n", bridge)
+		return
+	}
+
+	// 调用视觉检测
+	visionResult, result := winBridge.DetectConversations(handle)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to detect conversations: %s\n", result.Error)
+
+		// 显示诊断信息
+		if len(result.Diagnostics) > 0 {
+			fmt.Printf("Diagnostics:\n")
+			for _, diag := range result.Diagnostics {
+				fmt.Printf("  - %s\n", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("    %s: %s\n", k, v)
+				}
+			}
+		}
+		return
+	}
+
+	// 显示诊断信息
+	if len(result.Diagnostics) > 0 {
+		fmt.Printf("Vision Detection Diagnostics:\n")
+		for _, diag := range result.Diagnostics {
+			fmt.Printf("  - %s\n", diag.Message)
+			for k, v := range diag.Context {
+				fmt.Printf("    %s: %s\n", k, v)
+			}
+		}
+		fmt.Println()
+	}
+
+	// 显示视觉检测结果
+	fmt.Printf("Vision Detection Results:\n")
+	fmt.Printf("  Window Size: %d x %d\n", visionResult.WindowWidth, visionResult.WindowHeight)
+	fmt.Printf("  Image Size: %d bytes\n", visionResult.ImageSize)
+	fmt.Printf("  Processing Time: %v\n", visionResult.ProcessingTime)
+
+	if visionResult.Error != "" {
+		fmt.Printf("  Error: %s\n", visionResult.Error)
+	}
+	fmt.Println()
+
+	// 显示左侧会话列表区域
+	fmt.Printf("Left Sidebar Region:\n")
+	fmt.Printf("  x=%d, y=%d, width=%d, height=%d\n",
+		visionResult.LeftSidebarRect[0], visionResult.LeftSidebarRect[1],
+		visionResult.LeftSidebarRect[2], visionResult.LeftSidebarRect[3])
+	fmt.Println()
+
+	// 显示检测到的会话项
+	fmt.Printf("Detected Conversations: %d\n", len(visionResult.ConversationRects))
+	if len(visionResult.ConversationRects) > 0 {
+		fmt.Println("Conversation Items:")
+		for _, conv := range visionResult.ConversationRects {
+			fmt.Printf("  [%d] x=%d, y=%d, w=%d, h=%d\n", conv.Index, conv.X, conv.Y, conv.Width, conv.Height)
+			fmt.Printf("      Features: ")
+			features := []string{}
+			if conv.HasAvatar {
+				features = append(features, "avatar")
+			}
+			if conv.HasText {
+				features = append(features, "text")
+			}
+			if conv.HasUnreadDot {
+				features = append(features, "unread_dot")
+			}
+			if conv.IsSelected {
+				features = append(features, "selected")
+			}
+			if len(features) == 0 {
+				features = append(features, "none")
+			}
+			fmt.Printf("%s\n", strings.Join(features, ", "))
+
+			// 显示详细区域信息
+			if conv.HasAvatar && conv.AvatarRect[2] > 0 {
+				fmt.Printf("      Avatar: x=%d, y=%d, w=%d, h=%d\n",
+					conv.AvatarRect[0], conv.AvatarRect[1], conv.AvatarRect[2], conv.AvatarRect[3])
+			}
+			if conv.HasText && conv.TextRect[2] > 0 {
+				fmt.Printf("      Text: x=%d, y=%d, w=%d, h=%d\n",
+					conv.TextRect[0], conv.TextRect[1], conv.TextRect[2], conv.TextRect[3])
+			}
+			if conv.HasUnreadDot && conv.UnreadDotRect[2] > 0 {
+				fmt.Printf("      Unread Dot: x=%d, y=%d, w=%d, h=%d\n",
+					conv.UnreadDotRect[0], conv.UnreadDotRect[1], conv.UnreadDotRect[2], conv.UnreadDotRect[3])
+			}
+			fmt.Println()
+		}
+	} else {
+		fmt.Printf("  No conversation items detected\n")
+		fmt.Println()
+	}
+
+	// 显示检测到的特征统计
+	fmt.Printf("Detected Features:\n")
+	for feature, count := range visionResult.DetectedFeatures {
+		fmt.Printf("  %s: %d\n", feature, count)
+	}
+	fmt.Println()
+
+	// 显示调试图像信息
+	if visionResult.DebugImagePath != "" {
+		fmt.Printf("Debug Image Saved:\n")
+		fmt.Printf("  Path: %s\n", visionResult.DebugImagePath)
+		fmt.Printf("  You can open it with any image viewer\n")
+		fmt.Println()
+	}
+
+	// JSON 输出
+	if *jsonOutput {
+		jsonData, err := json.MarshalIndent(visionResult, "", "  ")
+		if err != nil {
+			fmt.Printf("ERROR: Failed to marshal vision result to JSON: %v\n", err)
+		} else {
+			fmt.Println(string(jsonData))
+		}
+	}
+
+	fmt.Println("=== Debug Vision Complete ===")
 }
 
