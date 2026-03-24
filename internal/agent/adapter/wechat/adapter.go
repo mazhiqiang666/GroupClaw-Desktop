@@ -809,15 +809,46 @@ func (a *WeChatAdapter) Read(conv protocol.ConversationRef, limit int) ([]protoc
 func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, taskID string) adapter.Result {
 	startTime := time.Now()
 
-	// 阶段1: 聚焦到窗口
-	focusResult := a.bridge.FocusWindow(conv.HostWindowHandle)
+	// 阶段1: 使用适配器的Focus方法聚焦到会话
+	focusResult := a.Focus(conv)
 	if focusResult.Status != adapter.StatusSuccess {
 		return adapter.Result{
 			Status:     adapter.StatusFailed,
 			ReasonCode: adapter.ReasonCode("FOCUS_FAILED"),
-			Error:      "Failed to focus window",
+			Error:      "Failed to focus conversation",
 			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: focusResult.Diagnostics, // 传递Focus的诊断信息
 		}
+	}
+
+	// 提取Focus诊断信息
+	focusLocateSource := "unknown"
+	focusConfidence := "0.00"
+	focusClickStrategy := "unknown"
+	sendAfterFocus := "true"
+
+	// 从Focus结果中提取关键诊断信息
+	for _, diag := range focusResult.Diagnostics {
+		for k, v := range diag.Context {
+			switch k {
+			case "locate_source":
+				focusLocateSource = v
+			case "confidence":
+				focusConfidence = v
+			case "click_strategy":
+				focusClickStrategy = v
+			case "click_source":
+				if focusClickStrategy == "unknown" {
+					focusClickStrategy = v
+				}
+			}
+		}
+	}
+
+	// 如果Focus置信度过低（<0.5），可以决定降级处理
+	focusConfidenceFloat := 0.0
+	if conf, err := strconv.ParseFloat(focusConfidence, 64); err == nil {
+		focusConfidenceFloat = conf
 	}
 
 	// 阶段2: 发送前捕获消息区域节点（用于后续差异比较）
@@ -918,6 +949,18 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	for k, v := range ConvertFocusEvidenceToDiagnostics(focusEvidence) {
 		diagnostics[k] = v
 	}
+	// 添加Focus相关诊断字段
+	diagnostics["focus_locate_source"] = focusLocateSource
+	diagnostics["focus_confidence"] = focusConfidence
+	diagnostics["focus_click_strategy"] = focusClickStrategy
+	diagnostics["send_after_focus"] = sendAfterFocus
+
+	// 根据Focus置信度决定是否降级处理
+	if focusConfidenceFloat < 0.5 {
+		diagnostics["focus_confidence_low"] = "true"
+		// 可以考虑降级处理逻辑，但当前仅记录诊断
+	}
+
 	// 添加内容长度
 	diagnostics["content_length"] = strconv.Itoa(len(content))
 
