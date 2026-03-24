@@ -105,7 +105,13 @@
       "Bash(./bridge-dump debug-accessible:*)",
       "Bash(./bridge-dump debug-nodes:*)",
       "Bash(./wechat-debug scan:*)",
-      "Bash(./bridge-dump.exe debug-uia:*)"
+      "Bash(./bridge-dump.exe debug-uia:*)",
+      "Bash(where tesseract:*)",
+      "Bash(./bridge-dump debug-ocr:*)",
+      "Bash(dir \"C:\\\\Program Files\\\\Tesseract-OCR\\\\tessdata\")",
+      "Bash(certutil -urlcache -split -f \"https://github.com/tesseract-ocr/tessdata/raw/main/chi_sim.traineddata\" tessdata/chi_sim.traineddata)",
+      "Bash(powershell -Command \"Invoke-WebRequest -Uri ''https://github.com/tesseract-ocr/tessdata/raw/main/chi_sim.traineddata'' -OutFile ''tessdata/chi_sim.traineddata''\")",
+      "Bash(export TESSDATA_PREFIX=\"e:/DG_work/GroupClaw-Desktop/tessdata\")"
     ],
     "additionalDirectories": [
       "D:\\go\\project\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.25.0.windows-amd64\\bin",

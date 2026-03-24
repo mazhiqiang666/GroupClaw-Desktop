@@ -48,3 +48,6 @@ temp/
 
 # Dependency directories
 vendor/
+
+# Tesseract language data
+tessdata/

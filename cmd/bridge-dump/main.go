@@ -147,6 +147,19 @@ func main() {
 			}
 		}
 		debugUIA(bridge, uintptr(handle), count)
+	case "debug-ocr":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-ocr <window-handle> [lang]")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		lang := "chi_sim" // 默认简体中文
+		if len(args) >= 3 {
+			lang = args[2]
+		}
+		debugOCR(bridge, uintptr(handle), lang)
 	default:
 		printUsage()
 	}
@@ -167,6 +180,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump debug-accessible <handle> - Debug: Accessible object diagnostics")
 	fmt.Println("  bridge-dump debug-nodes <handle> [N] - Debug: First N nodes with detailed info")
 	fmt.Println("  bridge-dump debug-uia <handle> [N]   - Debug: First N UIA nodes")
+	fmt.Println("  bridge-dump debug-ocr <handle> [lang] - Debug: OCR text extraction")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
@@ -1092,5 +1106,105 @@ func debugUIA(bridge windows.BridgeInterface, handle uintptr, count int) {
 	}
 
 	fmt.Println("=== Debug UIA Complete ===")
+}
+
+func debugOCR(bridge windows.BridgeInterface, handle uintptr, lang string) {
+	fmt.Printf("=== Debug: OCR Text Extraction for Handle: 0x%X (%d) ===\n\n", handle, handle)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	fmt.Printf("Window Information:\n")
+	fmt.Printf("  Handle: 0x%X (%d)\n", handle, handle)
+	fmt.Printf("  Class: %s\n", info.Class)
+	fmt.Printf("  Title: %s\n", info.Title)
+	fmt.Printf("  Language: %s\n", lang)
+	fmt.Println()
+
+	// 类型断言以访问 OCR 方法
+	winBridge, ok := bridge.(*windows.Bridge)
+	if !ok {
+		fmt.Printf("ERROR: Failed to cast bridge to *windows.Bridge\n")
+		fmt.Printf("Bridge type: %T\n", bridge)
+		return
+	}
+
+	// 提取文本
+	ocrResult, result := winBridge.ExtractTextFromWindow(handle, lang)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to extract text: %s\n", result.Error)
+
+		// 显示诊断信息
+		if len(result.Diagnostics) > 0 {
+			fmt.Printf("Diagnostics:\n")
+			for _, diag := range result.Diagnostics {
+				fmt.Printf("  - %s\n", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("    %s: %s\n", k, v)
+				}
+			}
+		}
+		return
+	}
+
+	// 显示诊断信息
+	if len(result.Diagnostics) > 0 {
+		fmt.Printf("OCR Extraction Diagnostics:\n")
+		for _, diag := range result.Diagnostics {
+			fmt.Printf("  - %s\n", diag.Message)
+			for k, v := range diag.Context {
+				fmt.Printf("    %s: %s\n", k, v)
+			}
+		}
+		fmt.Println()
+	}
+
+	// 显示 OCR 结果
+	fmt.Printf("OCR Results:\n")
+	fmt.Printf("  Window Size: %d x %d\n", ocrResult.WindowWidth, ocrResult.WindowHeight)
+	fmt.Printf("  Image Size: %d bytes\n", ocrResult.ImageSize)
+	fmt.Printf("  Tesseract Path: %s\n", ocrResult.TesseractPath)
+	fmt.Printf("  Processing Time: %v\n", ocrResult.ProcessingTime)
+
+	if ocrResult.Error != "" {
+		fmt.Printf("  Error: %s\n", ocrResult.Error)
+	}
+	fmt.Println()
+
+	// 显示提取的文本
+	fmt.Printf("Extracted Text (%d characters):\n", len(ocrResult.Text))
+	fmt.Println("--- BEGIN TEXT ---")
+	if ocrResult.Text == "" {
+		fmt.Println("(No text extracted)")
+	} else {
+		fmt.Println(ocrResult.Text)
+	}
+	fmt.Println("--- END TEXT ---")
+	fmt.Println()
+
+	// 显示区域文本（如果有）
+	if len(ocrResult.RegionTexts) > 0 {
+		fmt.Printf("Region Texts:\n")
+		for regionName, regionText := range ocrResult.RegionTexts {
+			fmt.Printf("  [%s]: %s\n", regionName, regionText)
+		}
+		fmt.Println()
+	}
+
+	// JSON 输出
+	if *jsonOutput {
+		jsonData, err := json.MarshalIndent(ocrResult, "", "  ")
+		if err != nil {
+			fmt.Printf("ERROR: Failed to marshal OCR result to JSON: %v\n", err)
+		} else {
+			fmt.Println(string(jsonData))
+		}
+	}
+
+	fmt.Println("=== Debug OCR Complete ===")
 }
 
