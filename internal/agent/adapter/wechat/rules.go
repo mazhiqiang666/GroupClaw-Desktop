@@ -43,6 +43,22 @@ type SendVerificationEvidence struct {
 	ScreenshotChanged bool
 	ChatAreaDiff      float64
 
+	// Input box verification
+	InputBoxClicked           bool
+	InputBoxDiffAfterClick    float64
+	InputBoxDiffAfterPaste    float64
+	SuspectedInputNotFocused  bool
+	SuspectedPasteFailed      bool
+
+	// Message area verification (multiple time points)
+	ChatAreaDiff300ms         float64
+	ChatAreaDiff800ms         float64
+	ChatAreaDiff1500ms        float64
+
+	// Failure indicator detection
+	FailureIndicatorFound    bool
+	FailureIndicatorBbox     [4]int
+
 	// Send failure detection
 	SuspectedSendFailed bool
 	SendFailureReason   string
@@ -498,6 +514,211 @@ func (r *MessageVerificationRules) VerifyMessageSend(
 	return evidence
 }
 
+// VerifyMessageSendEnhanced verifies message send with enhanced differential analysis
+func (r *MessageVerificationRules) VerifyMessageSendEnhanced(
+	beforeNodes []windows.AccessibleNode,
+	afterNodes []windows.AccessibleNode,
+	beforeScreenshot []byte,
+	afterScreenshot []byte,
+	chatAreaBounds [4]int,
+	content string,
+	// Enhanced parameters
+	inputBoxClicked bool,
+	inputBoxRect windows.InputBoxRect,
+	windowWidth int,
+	windowHeight int,
+	// Additional screenshots for multi-timepoint analysis
+	beforeClickScreenshot []byte,   // 输入框点击前截图
+	afterClickScreenshot []byte,    // 输入框点击后截图
+	afterPasteScreenshot []byte,    // 粘贴后截图
+	afterEnter300msScreenshot []byte, // Enter后300ms截图
+	afterEnter800msScreenshot []byte, // Enter后800ms截图
+	afterEnter1500msScreenshot []byte, // Enter后1500ms截图
+) SendVerificationEvidence {
+	evidence := SendVerificationEvidence{}
+	evidence.InputBoxClicked = inputBoxClicked
+
+	// Flatten nodes
+	beforeFlat := r.pathSystem.FlattenNodesWithPath(beforeNodes, "", 0, 10)
+	afterFlat := r.pathSystem.FlattenNodesWithPath(afterNodes, "", 0, 10)
+
+	// Filter message area nodes
+	beforeMessageNodes := r.messageClassifier.FilterMessageAreaNodes(beforeFlat, 0)
+	afterMessageNodes := r.messageClassifier.FilterMessageAreaNodes(afterFlat, 0)
+
+	// Evidence 1: New message nodes detected
+	evidence.NewMessageNodes = len(afterMessageNodes) - len(beforeMessageNodes)
+	if evidence.NewMessageNodes > 0 {
+		evidence.MessageNodeAdded = true
+	}
+
+	// Evidence 2: Check if new node contains sent content
+	for _, node := range afterMessageNodes {
+		if node.Name != "" && content != "" && strings.Contains(node.Name, content) {
+			evidence.MessageContentMatch = true
+			break
+		}
+	}
+
+	// Evidence 3: Input box verification (click and paste effects)
+	if inputBoxRect.Width > 0 && inputBoxRect.Height > 0 {
+		// Calculate input box diff after click
+		if len(beforeClickScreenshot) > 0 && len(afterClickScreenshot) > 0 {
+			evidence.InputBoxDiffAfterClick = windows.CalculateRectDiffPercent(
+				beforeClickScreenshot, afterClickScreenshot,
+				windowWidth, windowHeight, inputBoxRect,
+			)
+			// If click didn't cause change, suspect input not focused
+			if evidence.InputBoxDiffAfterClick < 0.01 {
+				evidence.SuspectedInputNotFocused = true
+			}
+		}
+		// Calculate input box diff after paste
+		if len(afterClickScreenshot) > 0 && len(afterPasteScreenshot) > 0 {
+			evidence.InputBoxDiffAfterPaste = windows.CalculateRectDiffPercent(
+				afterClickScreenshot, afterPasteScreenshot,
+				windowWidth, windowHeight, inputBoxRect,
+			)
+			// If paste didn't cause change, suspect paste failed
+			if evidence.InputBoxDiffAfterPaste < 0.01 {
+				evidence.SuspectedPasteFailed = true
+			}
+		}
+	}
+
+	// Evidence 4: Multi-timepoint chat area diff analysis
+	if len(beforeScreenshot) > 0 && len(afterEnter300msScreenshot) > 0 {
+		evidence.ChatAreaDiff300ms = r.evidenceCollector.CalculateChatAreaDiff(
+			beforeScreenshot, afterEnter300msScreenshot, chatAreaBounds)
+	}
+	if len(beforeScreenshot) > 0 && len(afterEnter800msScreenshot) > 0 {
+		evidence.ChatAreaDiff800ms = r.evidenceCollector.CalculateChatAreaDiff(
+			beforeScreenshot, afterEnter800msScreenshot, chatAreaBounds)
+	}
+	if len(beforeScreenshot) > 0 && len(afterEnter1500msScreenshot) > 0 {
+		evidence.ChatAreaDiff1500ms = r.evidenceCollector.CalculateChatAreaDiff(
+			beforeScreenshot, afterEnter1500msScreenshot, chatAreaBounds)
+	}
+
+	// Evidence 5: Screenshot change detection (traditional)
+	if len(beforeScreenshot) > 0 && len(afterScreenshot) > 0 {
+		evidence.ScreenshotChanged = r.evidenceCollector.checkScreenshotChange(
+			beforeScreenshot, afterScreenshot, chatAreaBounds)
+		evidence.ChatAreaDiff = r.evidenceCollector.CalculateChatAreaDiff(
+			beforeScreenshot, afterScreenshot, chatAreaBounds)
+	}
+
+	// Evidence 6: Failure indicator detection
+	if len(afterScreenshot) > 0 {
+		failureFound, failureBbox := windows.DetectFailureIndicator(
+			afterScreenshot, windowWidth, windowHeight, inputBoxRect, chatAreaBounds)
+		evidence.FailureIndicatorFound = failureFound
+		evidence.FailureIndicatorBbox = failureBbox
+	}
+
+	// Evidence 7: Send failure detection (enhanced heuristic)
+	sendFailed := false
+	failureReason := ""
+	failureSource := ""
+
+	// Rule 1: Input box not focused
+	if evidence.SuspectedInputNotFocused {
+		sendFailed = true
+		failureReason = "input_box_not_activated"
+		failureSource = "input_box_diff_low"
+	}
+	// Rule 2: Paste failed
+	if evidence.SuspectedPasteFailed {
+		sendFailed = true
+		failureReason = "paste_failed"
+		failureSource = "input_box_diff_low_after_paste"
+	}
+	// Rule 3: No message area change at any timepoint
+	if evidence.ChatAreaDiff300ms < 0.01 && evidence.ChatAreaDiff800ms < 0.01 && evidence.ChatAreaDiff1500ms < 0.01 {
+		sendFailed = true
+		failureReason = "no_chat_area_change"
+		failureSource = "multi_timepoint_analysis"
+	}
+	// Rule 4: Failure indicator found
+	if evidence.FailureIndicatorFound {
+		sendFailed = true
+		failureReason = "failure_indicator_detected"
+		failureSource = "visual_failure_detection"
+	}
+	// Rule 5: Original heuristic (fallback)
+	if evidence.NewMessageNodes <= 0 && evidence.ChatAreaDiff < 0.05 {
+		sendFailed = true
+		failureReason = "no_new_message_nodes_and_low_screenshot_change"
+		failureSource = "basic_heuristic"
+	}
+
+	evidence.SuspectedSendFailed = sendFailed
+	evidence.SendFailureReason = failureReason
+	evidence.FailureSignalSource = failureSource
+
+	// Calculate confidence
+	evidence.Confidence = r.calculateConfidenceEnhanced(evidence)
+
+	return evidence
+}
+
+// calculateConfidenceEnhanced calculates confidence score with enhanced evidence
+func (r *MessageVerificationRules) calculateConfidenceEnhanced(evidence SendVerificationEvidence) float64 {
+	score := 0.0
+	totalWeight := 0.0
+
+	// New message nodes: 25%
+	if evidence.MessageNodeAdded {
+		score += 0.25
+	}
+	totalWeight += 0.25
+
+	// Message content match: 20%
+	if evidence.MessageContentMatch {
+		score += 0.20
+	}
+	totalWeight += 0.20
+
+	// Input box clicked and changed: 15%
+	if evidence.InputBoxClicked && evidence.InputBoxDiffAfterClick > 0.01 {
+		score += 0.15
+	}
+	totalWeight += 0.15
+
+	// Paste succeeded (input box changed after paste): 10%
+	if evidence.InputBoxDiffAfterPaste > 0.01 {
+		score += 0.10
+	}
+	totalWeight += 0.10
+
+	// Chat area change at any timepoint: 15%
+	if evidence.ChatAreaDiff300ms > 0.01 || evidence.ChatAreaDiff800ms > 0.01 || evidence.ChatAreaDiff1500ms > 0.01 {
+		score += 0.15
+	}
+	totalWeight += 0.15
+
+	// No failure indicator: 10%
+	if !evidence.FailureIndicatorFound {
+		score += 0.10
+	}
+	totalWeight += 0.10
+
+	// Send failure detection penalty: -40% if suspected send failure
+	if evidence.SuspectedSendFailed {
+		score -= 0.4
+		// Ensure score doesn't go below 0
+		if score < 0 {
+			score = 0
+		}
+	}
+	totalWeight += 0.4 // Add weight for send failure detection
+
+	if totalWeight == 0 {
+		return 0
+	}
+	return score / totalWeight
+}
+
 // calculateConfidence calculates confidence score for message verification
 func (r *MessageVerificationRules) calculateConfidence(evidence SendVerificationEvidence) float64 {
 	score := 0.0
@@ -667,16 +888,26 @@ func ConvertFocusEvidenceToDiagnostics(evidence FocusVerificationEvidence) map[s
 // ConvertMessageEvidenceToDiagnostics converts message evidence to diagnostic context
 func ConvertMessageEvidenceToDiagnostics(evidence SendVerificationEvidence) map[string]string {
 	return map[string]string{
-		"new_message_nodes":      strconv.Itoa(evidence.NewMessageNodes),
-		"message_node_added":     strconv.FormatBool(evidence.MessageNodeAdded),
-		"message_content_match":  strconv.FormatBool(evidence.MessageContentMatch),
-		"screenshot_changed":     strconv.FormatBool(evidence.ScreenshotChanged),
-		"chat_area_diff":         fmt.Sprintf("%.2f", evidence.ChatAreaDiff),
-		"suspected_send_failed":  strconv.FormatBool(evidence.SuspectedSendFailed),
-		"send_failure_reason":    evidence.SendFailureReason,
-		"failure_signal_source":  evidence.FailureSignalSource,
-		"send_verification_quality": "basic_heuristic", // Placeholder for future enhancement
-		"confidence":             fmt.Sprintf("%.2f", evidence.Confidence),
+		"new_message_nodes":          strconv.Itoa(evidence.NewMessageNodes),
+		"message_node_added":         strconv.FormatBool(evidence.MessageNodeAdded),
+		"message_content_match":      strconv.FormatBool(evidence.MessageContentMatch),
+		"screenshot_changed":         strconv.FormatBool(evidence.ScreenshotChanged),
+		"chat_area_diff":             fmt.Sprintf("%.2f", evidence.ChatAreaDiff),
+		"input_box_clicked":          strconv.FormatBool(evidence.InputBoxClicked),
+		"input_box_diff_after_click": fmt.Sprintf("%.3f", evidence.InputBoxDiffAfterClick),
+		"input_box_diff_after_paste": fmt.Sprintf("%.3f", evidence.InputBoxDiffAfterPaste),
+		"suspected_input_not_focused": strconv.FormatBool(evidence.SuspectedInputNotFocused),
+		"suspected_paste_failed":     strconv.FormatBool(evidence.SuspectedPasteFailed),
+		"chat_area_diff_300ms":       fmt.Sprintf("%.3f", evidence.ChatAreaDiff300ms),
+		"chat_area_diff_800ms":       fmt.Sprintf("%.3f", evidence.ChatAreaDiff800ms),
+		"chat_area_diff_1500ms":      fmt.Sprintf("%.3f", evidence.ChatAreaDiff1500ms),
+		"failure_indicator_found":    strconv.FormatBool(evidence.FailureIndicatorFound),
+		"failure_indicator_bbox":     fmt.Sprintf("%d_%d_%d_%d", evidence.FailureIndicatorBbox[0], evidence.FailureIndicatorBbox[1], evidence.FailureIndicatorBbox[2], evidence.FailureIndicatorBbox[3]),
+		"suspected_send_failed":      strconv.FormatBool(evidence.SuspectedSendFailed),
+		"send_failure_reason":        evidence.SendFailureReason,
+		"failure_signal_source":      evidence.FailureSignalSource,
+		"send_verification_quality":  "enhanced_differential", // Updated to reflect enhanced verification
+		"confidence":                 fmt.Sprintf("%.2f", evidence.Confidence),
 	}
 }
 

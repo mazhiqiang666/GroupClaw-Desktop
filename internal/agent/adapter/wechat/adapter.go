@@ -894,31 +894,69 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	inputClickX := 0
 	inputClickY := 0
 	inputClickSource := "not_attempted"
+	inputBoxClickAttempts := 0
+	inputBoxClickSuccess := false
+	var inputBoxRect windows.InputBoxRect
+	windowWidth := 0
+	windowHeight := 0
+
+	// 截图变量用于增强验证
+	var beforeClickScreenshot []byte    // 输入框点击前截图
+	var afterClickScreenshot []byte     // 输入框点击后截图
+	var afterPasteScreenshot []byte     // 粘贴后截图
+	var afterEnter300msScreenshot []byte  // Enter后300ms截图
+	var afterEnter800msScreenshot []byte  // Enter后800ms截图
+	var afterEnter1500msScreenshot []byte // Enter后1500ms截图
 
 	// 检测左侧边栏矩形（通过视觉检测会话列表）
 	visionResult, visionDetectResult := a.bridge.DetectConversations(conv.HostWindowHandle)
 	if visionDetectResult.Status == adapter.StatusSuccess {
+		windowWidth = visionResult.WindowWidth
+		windowHeight = visionResult.WindowHeight
+
 		// 检测输入框区域（使用视觉检测到的窗口尺寸）
-		inputBoxRect, inputBoxResult := a.bridge.DetectInputBoxArea(
+		detectedRect, inputBoxResult := a.bridge.DetectInputBoxArea(
 			conv.HostWindowHandle,
 			visionResult.LeftSidebarRect,
 			visionResult.WindowWidth,
 			visionResult.WindowHeight,
 		)
+		inputBoxRect = detectedRect
 
 		if inputBoxResult.Status == adapter.StatusSuccess {
+			// 1. 捕获输入框点击前截图
+			beforeClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+
 			// 获取输入框点击坐标
 			clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(inputBoxRect)
-			// 点击输入框
-			clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
-			if clickResult.Status == adapter.StatusSuccess {
-				inputBoxClicked = true
-				inputClickX = clickX
-				inputClickY = clickY
-				inputClickSource = clickSource
-				// 等待点击生效
-				time.Sleep(100 * time.Millisecond)
+			// 点击输入框（尝试多次点击以提高可靠性）
+			maxClickAttempts := 2
+			localClickAttempts := 0
+			localClickSuccess := false
+			localInputClickSource := clickSource
+
+			for attempt := 1; attempt <= maxClickAttempts && !localClickSuccess; attempt++ {
+				clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+				if clickResult.Status == adapter.StatusSuccess {
+					localClickSuccess = true
+					localClickAttempts = attempt
+					inputBoxClicked = true
+					inputClickX = clickX
+					inputClickY = clickY
+					localInputClickSource = clickSource + fmt.Sprintf("_attempt_%d", attempt)
+					// 等待点击生效（增加等待时间以提高可靠性）
+					time.Sleep(200 * time.Millisecond)
+					// 捕获输入框点击后截图
+					afterClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+				} else if attempt < maxClickAttempts {
+					// 等待一段时间后重试
+					time.Sleep(100 * time.Millisecond)
+				}
 			}
+
+			inputClickSource = localInputClickSource
+			inputBoxClickAttempts = localClickAttempts
+			inputBoxClickSuccess = localClickSuccess
 		}
 	}
 
@@ -956,6 +994,10 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 			ElapsedMs:  time.Since(startTime).Milliseconds(),
 		}
 	}
+	// 等待粘贴完成
+	time.Sleep(50 * time.Millisecond)
+	// 捕获粘贴后截图
+	afterPasteScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
 
 	// 阶段5: 发送（Enter）
 	sendResult = a.bridge.SendKeys(conv.HostWindowHandle, "{ENTER}")
@@ -968,8 +1010,18 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		}
 	}
 
-	// 等待消息发送完成
-	time.Sleep(200 * time.Millisecond)
+	// 捕获Enter后多时间点截图
+	// 300ms后
+	time.Sleep(300 * time.Millisecond)
+	afterEnter300msScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+
+	// 800ms后（再等500ms）
+	time.Sleep(500 * time.Millisecond)
+	afterEnter800msScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+
+	// 1500ms后（再等700ms）
+	time.Sleep(700 * time.Millisecond)
+	afterEnter1500msScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
 
 	// 阶段6: 发送后捕获消息区域节点（用于差异比较）
 	nodesAfter, nodesAfterResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
@@ -979,8 +1031,9 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		messageNodesAfter = a.messageClassifier.FilterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
 	}
 
-	// 阶段6b: 发送后截图（用于差异比较）
-	afterScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
+	// 阶段6b: 发送后截图（用于差异比较） - 使用1500ms后的截图作为最终截图
+	var afterScreenshot []byte
+	afterScreenshot = afterEnter1500msScreenshot
 	elapsedMs := time.Since(startTime).Milliseconds()
 
 	// 阶段7: 使用规则模块验证消息发送
@@ -989,11 +1042,41 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		chatAreaBounds = messageNodesAfter[0].Bounds
 	}
 
-	messageEvidence := a.messageRules.VerifyMessageSend(
-		nodesBefore, nodesAfter,
-		beforeScreenshot, afterScreenshot,
-		chatAreaBounds, content,
-	)
+	// 如果视觉检测失败，提供默认窗口尺寸
+	if windowWidth == 0 || windowHeight == 0 {
+		windowWidth = 800
+		windowHeight = 600
+	}
+
+	var messageEvidence SendVerificationEvidence
+	// 使用增强验证函数（如果所有必需参数都可用）
+	if inputBoxRect.Width > 0 && inputBoxRect.Height > 0 &&
+		len(beforeClickScreenshot) > 0 && len(afterClickScreenshot) > 0 &&
+		len(afterPasteScreenshot) > 0 &&
+		len(afterEnter300msScreenshot) > 0 && len(afterEnter800msScreenshot) > 0 && len(afterEnter1500msScreenshot) > 0 {
+
+		messageEvidence = a.messageRules.VerifyMessageSendEnhanced(
+			nodesBefore, nodesAfter,
+			beforeScreenshot, afterScreenshot,
+			chatAreaBounds, content,
+			inputBoxClicked,
+			inputBoxRect,
+			windowWidth, windowHeight,
+			beforeClickScreenshot,
+			afterClickScreenshot,
+			afterPasteScreenshot,
+			afterEnter300msScreenshot,
+			afterEnter800msScreenshot,
+			afterEnter1500msScreenshot,
+		)
+	} else {
+		// 回退到原始验证函数
+		messageEvidence = a.messageRules.VerifyMessageSend(
+			nodesBefore, nodesAfter,
+			beforeScreenshot, afterScreenshot,
+			chatAreaBounds, content,
+		)
+	}
 
 	// 阶段8: 生成最终评估
 	assessment := a.deliveryRules.AssessDeliveryState(
@@ -1037,6 +1120,13 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	diagnostics["input_click_x"] = strconv.Itoa(inputClickX)
 	diagnostics["input_click_y"] = strconv.Itoa(inputClickY)
 	diagnostics["input_click_source"] = inputClickSource
+	diagnostics["input_box_click_attempts"] = strconv.Itoa(inputBoxClickAttempts)
+	diagnostics["input_box_click_success"] = strconv.FormatBool(inputBoxClickSuccess)
+	// 添加输入框矩形信息用于调试
+	diagnostics["input_box_x"] = strconv.Itoa(inputBoxRect.X)
+	diagnostics["input_box_y"] = strconv.Itoa(inputBoxRect.Y)
+	diagnostics["input_box_width"] = strconv.Itoa(inputBoxRect.Width)
+	diagnostics["input_box_height"] = strconv.Itoa(inputBoxRect.Height)
 	diagnostics["paste_executed"] = "true"  // 当前流程中必定执行粘贴
 	diagnostics["enter_executed"] = "true"   // 当前流程中必定执行发送
 

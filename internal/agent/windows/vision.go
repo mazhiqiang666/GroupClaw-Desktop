@@ -1762,3 +1762,109 @@ func computeRectEdgeDensity(img *image.RGBA, x, y, width, height int) int {
 	// 返回每100像素的边缘密度
 	return edgeCount * 100 / totalPixels
 }
+
+// CalculateRectDiffPercent 计算两个截图在指定矩形区域的差异百分比
+func CalculateRectDiffPercent(before []byte, after []byte, windowWidth, windowHeight int, rect InputBoxRect) float64 {
+	if len(before) == 0 || len(after) == 0 {
+		return 0
+	}
+	if rect.Width <= 0 || rect.Height <= 0 {
+		return 0
+	}
+	// 将BGR转换为RGBA
+	rowSize := ((windowWidth*24 + 31) / 32) * 4
+	beforeImg, err := bgrToRGBA(before, windowWidth, windowHeight, rowSize)
+	if err != nil {
+		return 0
+	}
+	afterImg, err := bgrToRGBA(after, windowWidth, windowHeight, rowSize)
+	if err != nil {
+		return 0
+	}
+	// 确保矩形在图像范围内
+	bounds := beforeImg.Bounds()
+	if rect.X < bounds.Min.X || rect.Y < bounds.Min.Y || rect.X+rect.Width > bounds.Max.X || rect.Y+rect.Height > bounds.Max.Y {
+		return 0
+	}
+	// 比较像素差异
+	diffPixels := 0
+	totalPixels := rect.Width * rect.Height
+	for y := rect.Y; y < rect.Y+rect.Height; y++ {
+		for x := rect.X; x < rect.X+rect.Width; x++ {
+			c1 := beforeImg.RGBAAt(x, y)
+			c2 := afterImg.RGBAAt(x, y)
+			// 简单颜色差异计算
+			if colorDiff(c1, c2) > 10 { // 阈值可调整
+				diffPixels++
+			}
+		}
+	}
+	if totalPixels == 0 {
+		return 0
+	}
+	return float64(diffPixels) / float64(totalPixels)
+}
+
+// DetectFailureIndicator 检测发送失败提示区域（异常小图标、红色警示等）
+// 返回是否检测到失败提示，以及其边界框（如果检测到）
+func DetectFailureIndicator(screenshot []byte, windowWidth, windowHeight int, inputBoxRect InputBoxRect, chatAreaBounds [4]int) (bool, [4]int) {
+	if len(screenshot) == 0 {
+		return false, [4]int{}
+	}
+	// 将BGR转换为RGBA
+	rowSize := ((windowWidth*24 + 31) / 32) * 4
+	img, err := bgrToRGBA(screenshot, windowWidth, windowHeight, rowSize)
+	if err != nil {
+		return false, [4]int{}
+	}
+	bounds := img.Bounds()
+
+	// 搜索区域：假设最新发送的消息在聊天区域底部
+	// 如果chatAreaBounds有效，在消息气泡右侧搜索
+	searchX := chatAreaBounds[0] + chatAreaBounds[2] + 10 // 消息区域右侧 + 边距
+	searchY := chatAreaBounds[1] + chatAreaBounds[3] - 50 // 底部向上50px
+	searchWidth := 100  // 搜索宽度
+	searchHeight := 50  // 搜索高度
+
+	// 调整确保在图像范围内
+	if searchX < bounds.Min.X {
+		searchX = bounds.Min.X
+	}
+	if searchY < bounds.Min.Y {
+		searchY = bounds.Min.Y
+	}
+	if searchX+searchWidth > bounds.Max.X {
+		searchWidth = bounds.Max.X - searchX
+	}
+	if searchY+searchHeight > bounds.Max.Y {
+		searchHeight = bounds.Max.Y - searchY
+	}
+	if searchWidth <= 0 || searchHeight <= 0 {
+		return false, [4]int{}
+	}
+
+	// 简单启发式：查找红色像素或高对比度小区域
+	redCount := 0
+	totalPixels := searchWidth * searchHeight
+	redThreshold := uint8(150) // R值高，G/B值低
+	gThreshold := uint8(100)
+	bThreshold := uint8(100)
+
+	for y := searchY; y < searchY+searchHeight; y++ {
+		for x := searchX; x < searchX+searchWidth; x++ {
+			c := img.RGBAAt(x, y)
+			if c.R > redThreshold && c.G < gThreshold && c.B < bThreshold {
+				redCount++
+			}
+		}
+	}
+
+	// 如果红色像素比例超过阈值，认为检测到失败提示
+	if totalPixels > 0 && float64(redCount)/float64(totalPixels) > 0.01 { // 1%红色像素
+		// 返回检测到失败提示，边界框为搜索区域
+		return true, [4]int{searchX, searchY, searchWidth, searchHeight}
+	}
+
+	// 未检测到失败提示
+	return false, [4]int{}
+}

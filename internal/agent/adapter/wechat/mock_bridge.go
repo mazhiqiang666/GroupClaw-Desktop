@@ -600,3 +600,26 @@ func (m *StateChangingMockBridge) DetectConversations(windowHandle uintptr) (win
 func (m *StateChangingMockBridge) Release() {
 	m.initialized = false
 }
+
+// DetectInputBoxArea 检测输入框区域（mock实现）
+func (m *StateChangingMockBridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) (windows.InputBoxRect, adapter.Result) {
+	// 返回模拟的输入框矩形
+	rect := windows.InputBoxRect{
+		X:      leftSidebarRect[0] + leftSidebarRect[2] + 20,
+		Y:      windowHeight - 100,
+		Width:  windowWidth - leftSidebarRect[2] - 40,
+		Height: 80,
+	}
+	return rect, adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+	}
+}
+
+// GetInputBoxClickPoint 获取输入框点击坐标（mock实现）
+func (m *StateChangingMockBridge) GetInputBoxClickPoint(inputBox windows.InputBoxRect) (x, y int, clickSource string) {
+	// 点击输入框左侧1/3处，垂直居中
+	x = inputBox.X + inputBox.Width/3
+	y = inputBox.Y + inputBox.Height/2
+	return x, y, "input_box_left_third_mock"
+}
