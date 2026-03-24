@@ -733,7 +733,8 @@ func (b *Bridge) DetectConversations(windowHandle uintptr) (VisionDebugResult, a
 }
 
 // GetConversationClickPoint 获取会话项的点击坐标
-func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) (x, y int, clickSource string, diag adapter.Diagnostic) {
+// strategy: "avatar_center", "text_center", "rect_center", "left_quarter_center", 或空字符串（使用默认优先级）
+func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int, strategy string) (x, y int, clickSource string, diag adapter.Diagnostic) {
 	if index < 0 || index >= len(result.ConversationRects) {
 		return 0, 0, "invalid_index", adapter.Diagnostic{
 			Timestamp: time.Now(),
@@ -748,6 +749,127 @@ func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) 
 
 	conv := result.ConversationRects[index]
 
+	// 如果指定了策略，直接使用该策略
+	if strategy != "" {
+		switch strategy {
+		case "avatar_center":
+			if conv.HasAvatar && conv.AvatarRect[2] > 0 && conv.AvatarRect[3] > 0 {
+				x = conv.AvatarRect[0] + conv.AvatarRect[2]/2
+				y = conv.AvatarRect[1] + conv.AvatarRect[3]/2
+				return x, y, "avatar_center", adapter.Diagnostic{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Click point calculated from avatar center (explicit strategy)",
+					Context: map[string]string{
+						"index": strconv.Itoa(index),
+						"avatar_x": strconv.Itoa(conv.AvatarRect[0]),
+						"avatar_y": strconv.Itoa(conv.AvatarRect[1]),
+						"avatar_width": strconv.Itoa(conv.AvatarRect[2]),
+						"avatar_height": strconv.Itoa(conv.AvatarRect[3]),
+						"click_x": strconv.Itoa(x),
+						"click_y": strconv.Itoa(y),
+						"strategy": strategy,
+					},
+				}
+			} else {
+				return 0, 0, "strategy_unavailable", adapter.Diagnostic{
+					Timestamp: time.Now(),
+					Level:     "warn",
+					Message:   "Avatar center strategy requested but avatar not available",
+					Context: map[string]string{
+						"index": strconv.Itoa(index),
+						"has_avatar": strconv.FormatBool(conv.HasAvatar),
+						"strategy": strategy,
+					},
+				}
+			}
+
+		case "text_center":
+			if conv.HasText && conv.TextRect[2] > 0 && conv.TextRect[3] > 0 {
+				x = conv.TextRect[0] + conv.TextRect[2]/2
+				y = conv.TextRect[1] + conv.TextRect[3]/2
+				return x, y, "text_center", adapter.Diagnostic{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Click point calculated from text center (explicit strategy)",
+					Context: map[string]string{
+						"index": strconv.Itoa(index),
+						"text_x": strconv.Itoa(conv.TextRect[0]),
+						"text_y": strconv.Itoa(conv.TextRect[1]),
+						"text_width": strconv.Itoa(conv.TextRect[2]),
+						"text_height": strconv.Itoa(conv.TextRect[3]),
+						"click_x": strconv.Itoa(x),
+						"click_y": strconv.Itoa(y),
+						"strategy": strategy,
+					},
+				}
+			} else {
+				return 0, 0, "strategy_unavailable", adapter.Diagnostic{
+					Timestamp: time.Now(),
+					Level:     "warn",
+					Message:   "Text center strategy requested but text not available",
+					Context: map[string]string{
+						"index": strconv.Itoa(index),
+						"has_text": strconv.FormatBool(conv.HasText),
+						"strategy": strategy,
+					},
+				}
+			}
+
+		case "rect_center":
+			x = conv.X + conv.Width/2
+			y = conv.Y + conv.Height/2
+			return x, y, "rect_center", adapter.Diagnostic{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Click point calculated from conversation rectangle center (explicit strategy)",
+				Context: map[string]string{
+					"index": strconv.Itoa(index),
+					"rect_x": strconv.Itoa(conv.X),
+					"rect_y": strconv.Itoa(conv.Y),
+					"rect_width": strconv.Itoa(conv.Width),
+					"rect_height": strconv.Itoa(conv.Height),
+					"click_x": strconv.Itoa(x),
+					"click_y": strconv.Itoa(y),
+					"strategy": strategy,
+				},
+			}
+
+		case "left_quarter_center":
+			// 点击矩形左侧四分之一处的中心点
+			x = conv.X + conv.Width/4
+			y = conv.Y + conv.Height/2
+			return x, y, "left_quarter_center", adapter.Diagnostic{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Click point calculated from left quarter center",
+				Context: map[string]string{
+					"index": strconv.Itoa(index),
+					"rect_x": strconv.Itoa(conv.X),
+					"rect_y": strconv.Itoa(conv.Y),
+					"rect_width": strconv.Itoa(conv.Width),
+					"rect_height": strconv.Itoa(conv.Height),
+					"click_x": strconv.Itoa(x),
+					"click_y": strconv.Itoa(y),
+					"strategy": strategy,
+				},
+			}
+
+		default:
+			return 0, 0, "invalid_strategy", adapter.Diagnostic{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "Invalid click strategy",
+				Context: map[string]string{
+					"index": strconv.Itoa(index),
+					"strategy": strategy,
+					"valid_strategies": "avatar_center, text_center, rect_center, left_quarter_center",
+				},
+			}
+		}
+	}
+
+	// 未指定策略，使用默认优先级
 	// 1. 优先点击头像区域中心
 	if conv.HasAvatar && conv.AvatarRect[2] > 0 && conv.AvatarRect[3] > 0 {
 		x = conv.AvatarRect[0] + conv.AvatarRect[2]/2
@@ -755,7 +877,7 @@ func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) 
 		return x, y, "avatar_center", adapter.Diagnostic{
 			Timestamp: time.Now(),
 			Level:     "info",
-			Message:   "Click point calculated from avatar center",
+			Message:   "Click point calculated from avatar center (default priority)",
 			Context: map[string]string{
 				"index": strconv.Itoa(index),
 				"avatar_x": strconv.Itoa(conv.AvatarRect[0]),
@@ -764,6 +886,7 @@ func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) 
 				"avatar_height": strconv.Itoa(conv.AvatarRect[3]),
 				"click_x": strconv.Itoa(x),
 				"click_y": strconv.Itoa(y),
+				"strategy": "default_priority",
 			},
 		}
 	}
@@ -775,7 +898,7 @@ func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) 
 		return x, y, "text_center", adapter.Diagnostic{
 			Timestamp: time.Now(),
 			Level:     "info",
-			Message:   "Click point calculated from text center",
+			Message:   "Click point calculated from text center (default priority)",
 			Context: map[string]string{
 				"index": strconv.Itoa(index),
 				"text_x": strconv.Itoa(conv.TextRect[0]),
@@ -784,6 +907,7 @@ func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) 
 				"text_height": strconv.Itoa(conv.TextRect[3]),
 				"click_x": strconv.Itoa(x),
 				"click_y": strconv.Itoa(y),
+				"strategy": "default_priority",
 			},
 		}
 	}
@@ -794,7 +918,7 @@ func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) 
 	return x, y, "rect_center", adapter.Diagnostic{
 		Timestamp: time.Now(),
 		Level:     "info",
-		Message:   "Click point calculated from conversation rectangle center",
+		Message:   "Click point calculated from conversation rectangle center (default priority)",
 		Context: map[string]string{
 			"index": strconv.Itoa(index),
 			"rect_x": strconv.Itoa(conv.X),
@@ -803,6 +927,221 @@ func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) 
 			"rect_height": strconv.Itoa(conv.Height),
 			"click_x": strconv.Itoa(x),
 			"click_y": strconv.Itoa(y),
+			"strategy": "default_priority",
 		},
 	}
+}
+
+// ImageDifferenceResult 图像差异分析结果
+type ImageDifferenceResult struct {
+	TotalPixels       int     `json:"total_pixels"`
+	DifferentPixels   int     `json:"different_pixels"`
+	DifferencePercent float64 `json:"difference_percent"`
+	DiffBoundingBox   [4]int  `json:"diff_bounding_box"` // x, y, width, height
+	DiffCentroidX     int     `json:"diff_centroid_x"`
+	DiffCentroidY     int     `json:"diff_centroid_y"`
+	LeftSideDiffPixels int    `json:"left_side_diff_pixels"`   // 左侧区域差异像素数
+	RightSideDiffPixels int   `json:"right_side_diff_pixels"`  // 右侧区域差异像素数
+	LeftSidePercent   float64 `json:"left_side_percent"`       // 左侧差异百分比
+	RightSidePercent  float64 `json:"right_side_percent"`      // 右侧差异百分比
+	DiffImagePath     string  `json:"diff_image_path,omitempty"`
+}
+
+// ComputeImageDifference 计算两幅RGBA图像的差异
+func ComputeImageDifference(img1, img2 *image.RGBA, leftSidebarRect [4]int, windowWidth int) (ImageDifferenceResult, error) {
+	result := ImageDifferenceResult{}
+
+	if img1 == nil || img2 == nil {
+		return result, fmt.Errorf("one or both images are nil")
+	}
+
+	bounds1 := img1.Bounds()
+	bounds2 := img2.Bounds()
+
+	if bounds1 != bounds2 {
+		return result, fmt.Errorf("image dimensions differ: %v vs %v", bounds1, bounds2)
+	}
+
+	width := bounds1.Dx()
+	height := bounds1.Dy()
+	result.TotalPixels = width * height
+
+	// 计算差异
+	diffCount := 0
+	minX, minY := width, height
+	maxX, maxY := 0, 0
+	sumX, sumY := 0, 0
+
+	// 定义左侧和右侧区域
+	leftSideEnd := leftSidebarRect[0] + leftSidebarRect[2]
+	leftDiffCount := 0
+	rightDiffCount := 0
+
+	// 创建差异图像（可选）
+	diffImg := image.NewRGBA(bounds1)
+
+	for y := bounds1.Min.Y; y < bounds1.Max.Y; y++ {
+		for x := bounds1.Min.X; x < bounds1.Max.X; x++ {
+			idx1 := img1.PixOffset(x, y)
+			idx2 := img2.PixOffset(x, y)
+
+			// 简单比较RGBA值
+			diff := false
+			for i := 0; i < 4; i++ {
+				if img1.Pix[idx1+i] != img2.Pix[idx2+i] {
+					diff = true
+					break
+				}
+			}
+
+			if diff {
+				diffCount++
+				// 更新边界框
+				if x < minX { minX = x }
+				if x > maxX { maxX = x }
+				if y < minY { minY = y }
+				if y > maxY { maxY = y }
+
+				sumX += x
+				sumY += y
+
+				// 标记差异图像为红色
+				diffImg.SetRGBA(x, y, color.RGBA{255, 0, 0, 255})
+
+				// 统计左右侧差异
+				if x < leftSideEnd {
+					leftDiffCount++
+				} else {
+					rightDiffCount++
+				}
+			} else {
+				// 无差异处设置为透明
+				diffImg.SetRGBA(x, y, color.RGBA{0, 0, 0, 0})
+			}
+		}
+	}
+
+	result.DifferentPixels = diffCount
+	if result.TotalPixels > 0 {
+		result.DifferencePercent = float64(diffCount) / float64(result.TotalPixels) * 100.0
+	}
+
+	// 计算边界框
+	if diffCount > 0 {
+		result.DiffBoundingBox = [4]int{minX, minY, maxX - minX + 1, maxY - minY + 1}
+		result.DiffCentroidX = sumX / diffCount
+		result.DiffCentroidY = sumY / diffCount
+	}
+
+	// 左右侧差异统计
+	result.LeftSideDiffPixels = leftDiffCount
+	result.RightSideDiffPixels = rightDiffCount
+
+	// 计算左右侧差异百分比
+	leftSidePixels := leftSideEnd * height
+	rightSidePixels := (width - leftSideEnd) * height
+
+	if leftSidePixels > 0 {
+		result.LeftSidePercent = float64(leftDiffCount) / float64(leftSidePixels) * 100.0
+	}
+	if rightSidePixels > 0 {
+		result.RightSidePercent = float64(rightDiffCount) / float64(rightSidePixels) * 100.0
+	}
+
+	// 保存差异图像（如果差异像素数大于0）
+	if diffCount > 0 {
+		tempDir := os.TempDir()
+		timestamp := time.Now().UnixNano()
+		diffPath := filepath.Join(tempDir, fmt.Sprintf("diff_%d.png", timestamp))
+
+		f, err := os.Create(diffPath)
+		if err == nil {
+			defer f.Close()
+			png.Encode(f, diffImg)
+			result.DiffImagePath = diffPath
+		}
+	}
+
+	return result, nil
+}
+
+// ComputeRegionDifference 计算特定区域的图像差异
+func ComputeRegionDifference(img1, img2 *image.RGBA, regionX, regionY, regionWidth, regionHeight int) (int, float64, error) {
+	if img1 == nil || img2 == nil {
+		return 0, 0.0, fmt.Errorf("one or both images are nil")
+	}
+
+	bounds1 := img1.Bounds()
+	bounds2 := img2.Bounds()
+
+	if bounds1 != bounds2 {
+		return 0, 0.0, fmt.Errorf("image dimensions differ")
+	}
+
+	// 确保区域在图像范围内
+	if regionX < bounds1.Min.X { regionX = bounds1.Min.X }
+	if regionY < bounds1.Min.Y { regionY = bounds1.Min.Y }
+	if regionX+regionWidth > bounds1.Max.X { regionWidth = bounds1.Max.X - regionX }
+	if regionY+regionHeight > bounds1.Max.Y { regionHeight = bounds1.Max.Y - regionY }
+
+	if regionWidth <= 0 || regionHeight <= 0 {
+		return 0, 0.0, fmt.Errorf("invalid region dimensions")
+	}
+
+	totalPixels := regionWidth * regionHeight
+	diffCount := 0
+
+	for y := regionY; y < regionY+regionHeight; y++ {
+		for x := regionX; x < regionX+regionWidth; x++ {
+			idx1 := img1.PixOffset(x, y)
+			idx2 := img2.PixOffset(x, y)
+
+			diff := false
+			for i := 0; i < 4; i++ {
+				if img1.Pix[idx1+i] != img2.Pix[idx2+i] {
+					diff = true
+					break
+				}
+			}
+
+			if diff {
+				diffCount++
+			}
+		}
+	}
+
+	diffPercent := 0.0
+	if totalPixels > 0 {
+		diffPercent = float64(diffCount) / float64(totalPixels) * 100.0
+	}
+
+	return diffCount, diffPercent, nil
+}
+
+// CaptureWindowScreenshot 捕获窗口截图并返回RGBA图像
+func (b *Bridge) CaptureWindowScreenshot(windowHandle uintptr) (*image.RGBA, error) {
+	// 使用现有的CaptureWindow方法获取像素数据
+	pixels, result := b.CaptureWindow(windowHandle)
+	if result.Status != adapter.StatusSuccess {
+		return nil, fmt.Errorf("failed to capture window: %s", result.Error)
+	}
+
+	// 获取窗口尺寸
+	rect, rectResult := b.getWindowRectInternal(windowHandle)
+	if rectResult.Status != adapter.StatusSuccess {
+		return nil, fmt.Errorf("failed to get window rect: %s", rectResult.Error)
+	}
+
+	width := int(rect.Right - rect.Left)
+	height := int(rect.Bottom - rect.Top)
+
+	if width <= 0 || height <= 0 {
+		return nil, fmt.Errorf("invalid window dimensions: %dx%d", width, height)
+	}
+
+	// 计算行大小
+	rowSize := ((width*24 + 31) / 32) * 4
+
+	// 将BGR转换为RGBA
+	return bgrToRGBA(pixels, width, height, rowSize)
 }

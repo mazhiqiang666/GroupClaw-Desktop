@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"image"
 	"log"
 	"strconv"
 	"strings"
@@ -164,7 +165,8 @@ func main() {
 		debugOCR(bridge, uintptr(handle), lang)
 	case "click-conversation":
 		if len(args) < 3 {
-			log.Fatal("Usage: bridge-dump click-conversation <window-handle> <index>")
+			log.Fatal("Usage: bridge-dump click-conversation <window-handle> <index> [strategy]")
+			log.Fatal("Strategies: rect_center, left_quarter_center, avatar_center, text_center")
 		}
 		handle, err := strconv.ParseUint(args[1], 10, 64)
 		if err != nil {
@@ -174,7 +176,11 @@ func main() {
 		if err != nil {
 			log.Fatalf("Invalid index: %v", err)
 		}
-		clickConversation(bridge, uintptr(handle), index)
+		strategy := ""
+		if len(args) >= 4 {
+			strategy = args[3]
+		}
+		clickConversation(bridge, uintptr(handle), index, strategy)
 	case "debug-vision":
 		if len(args) < 2 {
 			log.Fatal("Usage: bridge-dump debug-vision <window-handle>")
@@ -1415,8 +1421,9 @@ func debugVision(bridge windows.BridgeInterface, handle uintptr) {
 }
 
 // clickConversation 点击视觉检测到的会话项并验证
-func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int) {
-	fmt.Printf("=== Click Conversation: Handle 0x%X (%d), Index %d ===\n\n", handle, handle, index)
+// strategy: "avatar_center", "text_center", "rect_center", "left_quarter_center", 或空字符串（使用默认优先级）
+func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int, strategy string) {
+	fmt.Printf("=== Enhanced Click Conversation: Handle 0x%X (%d), Index %d, Strategy '%s' ===\n\n", handle, handle, index, strategy)
 
 	// 获取窗口信息
 	info, infoResult := bridge.GetWindowInfo(handle)
@@ -1439,8 +1446,10 @@ func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int
 		return
 	}
 
-	// 步骤1：点击前视觉检测
-	fmt.Printf("--- Step 1: Pre-click Vision Detection ---\n")
+	// ============================================
+	// 步骤1：点击前视觉检测和截图
+	// ============================================
+	fmt.Printf("--- Step 1: Pre-click Vision Detection & Screenshot ---\n")
 	beforeResult, result := winBridge.DetectConversations(handle)
 	if result.Status != adapter.StatusSuccess {
 		fmt.Printf("ERROR: Failed to detect conversations before click: %s\n", result.Error)
@@ -1460,9 +1469,27 @@ func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int
 		preConv.HasAvatar, preConv.HasText, preConv.HasUnreadDot, preConv.IsSelected)
 	fmt.Println()
 
+	// 点击前截图 (click_before)
+	fmt.Printf("Capturing pre-click screenshot...\n")
+	beforeScreenshot, err := winBridge.CaptureWindowScreenshot(handle)
+	if err != nil {
+		fmt.Printf("WARNING: Failed to capture pre-click screenshot: %v\n", err)
+		fmt.Printf("  (Continuing without pixel-level verification)\n")
+		beforeScreenshot = nil
+	} else {
+		fmt.Printf("Pre-click screenshot captured: %dx%d pixels\n", beforeScreenshot.Bounds().Dx(), beforeScreenshot.Bounds().Dy())
+	}
+
+	// ============================================
 	// 步骤2：计算点击点
+	// ============================================
 	fmt.Printf("--- Step 2: Calculate Click Point ---\n")
-	x, y, clickSource, clickDiag := winBridge.GetConversationClickPoint(beforeResult, index)
+	x, y, clickSource, clickDiag := winBridge.GetConversationClickPoint(beforeResult, index, strategy)
+	if clickSource == "invalid_strategy" || clickSource == "strategy_unavailable" {
+		fmt.Printf("ERROR: Click strategy failed: %s\n", clickDiag.Message)
+		return
+	}
+
 	fmt.Printf("Click Point Calculation:\n")
 	fmt.Printf("  Coordinates: x=%d, y=%d\n", x, y)
 	fmt.Printf("  Source: %s\n", clickSource)
@@ -1472,7 +1499,9 @@ func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int
 	}
 	fmt.Println()
 
+	// ============================================
 	// 步骤3：执行点击
+	// ============================================
 	fmt.Printf("--- Step 3: Execute Click ---\n")
 	clickResult := winBridge.Click(handle, x, y)
 	if clickResult.Status != adapter.StatusSuccess {
@@ -1481,100 +1510,269 @@ func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int
 	}
 	fmt.Printf("Click executed successfully\n")
 
-	// 等待一小段时间让界面更新
-	time.Sleep(500 * time.Millisecond)
+	// ============================================
+	// 步骤4：多时刻截图
+	// ============================================
+	fmt.Printf("--- Step 4: Multi-time Screenshots ---\n")
 
-	// 步骤4：点击后视觉检测
-	fmt.Printf("--- Step 4: Post-click Vision Detection ---\n")
-	afterResult, result := winBridge.DetectConversations(handle)
-	if result.Status != adapter.StatusSuccess {
-		fmt.Printf("WARNING: Failed to detect conversations after click: %s\n", result.Error)
-		fmt.Printf("  (Continuing with minimal verification)\n")
-		// 继续，但可能无法进行完整验证
+	type TimedScreenshot struct {
+		TimeLabel string
+		WaitTime  time.Duration
+		Image     *image.RGBA
+		DiffResult windows.ImageDifferenceResult
 	}
 
-	// 步骤5：验证变化
-	fmt.Printf("--- Step 5: Verification ---\n")
-	verificationPassed := false
-	verificationMethods := []string{}
+	timePoints := []TimedScreenshot{
+		{"click_before", 0, beforeScreenshot, windows.ImageDifferenceResult{}},
+	}
 
-	if len(afterResult.ConversationRects) > index {
-		postConv := afterResult.ConversationRects[index]
+	// 定义等待时间点
+	waitTimes := []struct {
+		label string
+		delay time.Duration
+	}{
+		{"click_after_300ms", 300 * time.Millisecond},
+		{"click_after_800ms", 800 * time.Millisecond},
+		{"click_after_1500ms", 1500 * time.Millisecond},
+	}
 
-		// 验证方法1：选中状态变化
-		if preConv.IsSelected != postConv.IsSelected {
-			verificationPassed = true
-			verificationMethods = append(verificationMethods, "selection_state_changed")
-			fmt.Printf("✓ Selection state changed: %v -> %v\n", preConv.IsSelected, postConv.IsSelected)
+	// 获取左侧边栏区域用于左右侧分析
+	leftSidebarRect := beforeResult.LeftSidebarRect
+	if leftSidebarRect[2] == 0 || leftSidebarRect[3] == 0 {
+		// 如果没有检测到左侧边栏，使用默认值（假设左侧30%）
+		width := beforeResult.WindowWidth
+		if width <= 0 && beforeScreenshot != nil {
+			width = beforeScreenshot.Bounds().Dx()
+		}
+		leftSidebarRect = [4]int{0, 0, width * 30 / 100, beforeResult.WindowHeight}
+	}
+
+	// 捕获每个时间点的截图
+	for _, wt := range waitTimes {
+		fmt.Printf("  Waiting %s...\n", wt.label)
+		time.Sleep(wt.delay)
+
+		screenshot, err := winBridge.CaptureWindowScreenshot(handle)
+		if err != nil {
+			fmt.Printf("  WARNING: Failed to capture %s screenshot: %v\n", wt.label, err)
+			continue
+		}
+
+		fmt.Printf("  Captured %s: %dx%d pixels\n", wt.label, screenshot.Bounds().Dx(), screenshot.Bounds().Dy())
+
+		// 计算与点击前图像的差异
+		var diffResult windows.ImageDifferenceResult
+		if beforeScreenshot != nil {
+			diffResult, err = windows.ComputeImageDifference(beforeScreenshot, screenshot, leftSidebarRect, beforeResult.WindowWidth)
+			if err != nil {
+				fmt.Printf("  WARNING: Failed to compute difference for %s: %v\n", wt.label, err)
+			} else {
+				fmt.Printf("  Difference: %.2f%% pixels changed\n", diffResult.DifferencePercent)
+			}
+		}
+
+		timePoints = append(timePoints, TimedScreenshot{
+			TimeLabel: wt.label,
+			WaitTime:  wt.delay,
+			Image:     screenshot,
+			DiffResult: diffResult,
+		})
+	}
+
+	// ============================================
+	// 步骤5：增强验证（4种验证信号）
+	// ============================================
+	fmt.Printf("--- Step 5: Enhanced Verification ---\n")
+
+	verificationSignals := make(map[string]bool)
+	signalDetails := make(map[string]string)
+
+	// 使用最后一次截图进行验证（1500ms后）
+	var lastDiff windows.ImageDifferenceResult
+	if len(timePoints) > 1 {
+		lastDiff = timePoints[len(timePoints)-1].DiffResult
+	}
+
+	// 信号1：左侧被点击会话项区域的像素差异
+	if preConv.X >= 0 && preConv.Y >= 0 && preConv.Width > 0 && preConv.Height > 0 {
+		// 定义会话项区域（扩大一些以捕获周围变化）
+		regionX := preConv.X - 5
+		regionY := preConv.Y - 5
+		regionWidth := preConv.Width + 10
+		regionHeight := preConv.Height + 10
+
+		if regionX < 0 { regionX = 0 }
+		if regionY < 0 { regionY = 0 }
+
+		if beforeScreenshot != nil && timePoints[len(timePoints)-1].Image != nil {
+			convDiffCount, convDiffPercent, err := windows.ComputeRegionDifference(
+				beforeScreenshot,
+				timePoints[len(timePoints)-1].Image,
+				regionX, regionY, regionWidth, regionHeight,
+			)
+
+			if err == nil {
+				verificationSignals["clicked_region_pixel_diff"] = convDiffPercent > 0.5 // 阈值0.5%
+				signalDetails["clicked_region_pixel_diff"] = fmt.Sprintf("%.2f%% (count=%d)", convDiffPercent, convDiffCount)
+				fmt.Printf("✓ Clicked region pixel diff: %.2f%% (%d pixels)\n", convDiffPercent, convDiffCount)
+			}
+		}
+	}
+
+	// 信号2：右侧消息区的像素差异
+	if beforeScreenshot != nil && timePoints[len(timePoints)-1].Image != nil {
+		rightRegionX := leftSidebarRect[0] + leftSidebarRect[2]
+		rightRegionWidth := beforeResult.WindowWidth - rightRegionX
+		if rightRegionWidth > 0 {
+			rightDiffCount, rightDiffPercent, err := windows.ComputeRegionDifference(
+				beforeScreenshot,
+				timePoints[len(timePoints)-1].Image,
+				rightRegionX, 0, rightRegionWidth, beforeResult.WindowHeight,
+			)
+
+			if err == nil {
+				verificationSignals["right_region_pixel_diff"] = rightDiffPercent > 0.5
+				signalDetails["right_region_pixel_diff"] = fmt.Sprintf("%.2f%% (count=%d)", rightDiffPercent, rightDiffCount)
+				fmt.Printf("✓ Right region pixel diff: %.2f%% (%d pixels)\n", rightDiffPercent, rightDiffCount)
+			}
+		}
+	}
+
+	// 信号3：整窗截图差异面积
+	if lastDiff.TotalPixels > 0 {
+		verificationSignals["whole_window_diff_area"] = lastDiff.DifferencePercent > 0.2
+		signalDetails["whole_window_diff_area"] = fmt.Sprintf("%.2f%% (%d pixels)", lastDiff.DifferencePercent, lastDiff.DifferentPixels)
+		fmt.Printf("✓ Whole window diff area: %.2f%% (%d/%d pixels)\n",
+			lastDiff.DifferencePercent, lastDiff.DifferentPixels, lastDiff.TotalPixels)
+	}
+
+	// 信号4：差异热区的 bounding box
+	if lastDiff.DifferentPixels > 0 {
+		verificationSignals["diff_bounding_box"] = lastDiff.DiffBoundingBox[2] > 10 && lastDiff.DiffBoundingBox[3] > 10
+		signalDetails["diff_bounding_box"] = fmt.Sprintf("x=%d,y=%d,w=%d,h=%d",
+			lastDiff.DiffBoundingBox[0], lastDiff.DiffBoundingBox[1],
+			lastDiff.DiffBoundingBox[2], lastDiff.DiffBoundingBox[3])
+		fmt.Printf("✓ Diff bounding box: x=%d,y=%d,w=%d,h=%d\n",
+			lastDiff.DiffBoundingBox[0], lastDiff.DiffBoundingBox[1],
+			lastDiff.DiffBoundingBox[2], lastDiff.DiffBoundingBox[3])
+	}
+
+	// 左右侧差异分析
+	if lastDiff.TotalPixels > 0 {
+		fmt.Printf("✓ Left/Right analysis:\n")
+		fmt.Printf("  Left side: %.2f%% (%d pixels)\n", lastDiff.LeftSidePercent, lastDiff.LeftSideDiffPixels)
+		fmt.Printf("  Right side: %.2f%% (%d pixels)\n", lastDiff.RightSidePercent, lastDiff.RightSideDiffPixels)
+
+		if lastDiff.LeftSidePercent > lastDiff.RightSidePercent * 2 {
+			signalDetails["change_location"] = "predominantly_left"
+			fmt.Printf("  Change predominantly in left side (%.1fx more)\n",
+				lastDiff.LeftSidePercent / max(lastDiff.RightSidePercent, 0.01))
+		} else if lastDiff.RightSidePercent > lastDiff.LeftSidePercent * 2 {
+			signalDetails["change_location"] = "predominantly_right"
+			fmt.Printf("  Change predominantly in right side (%.1fx more)\n",
+				lastDiff.RightSidePercent / max(lastDiff.LeftSidePercent, 0.01))
 		} else {
-			fmt.Printf("- Selection state unchanged: %v\n", preConv.IsSelected)
+			signalDetails["change_location"] = "balanced"
+			fmt.Printf("  Change balanced between left and right\n")
 		}
+	}
 
-		// 验证方法2：亮度变化（选中项通常较亮）
-		if preConv.IsSelected != postConv.IsSelected {
-			// 如果选中状态改变了，这是一个强信号
-			fmt.Printf("  Strong signal: selection state indicates successful click\n")
-		}
+	// 传统的视觉检测验证（作为补充）
+	fmt.Printf("\n--- Step 6: Traditional Vision Detection Verification ---\n")
+	afterResult, result := winBridge.DetectConversations(handle)
+	if result.Status == adapter.StatusSuccess {
+		if len(afterResult.ConversationRects) > index {
+			postConv := afterResult.ConversationRects[index]
 
-		// 验证方法3：项目位置可能微调（滚动等）
-		positionDiff := abs(postConv.Y - preConv.Y)
-		if positionDiff > 2 && positionDiff < 50 { // 轻微移动但不是大幅滚动
-			verificationPassed = true
-			verificationMethods = append(verificationMethods, "position_adjusted")
-			fmt.Printf("✓ Position adjusted: y diff = %d\n", positionDiff)
+			// 选中状态变化
+			if preConv.IsSelected != postConv.IsSelected {
+				verificationSignals["selection_state_changed"] = true
+				signalDetails["selection_state_changed"] = fmt.Sprintf("%v->%v", preConv.IsSelected, postConv.IsSelected)
+				fmt.Printf("✓ Selection state changed: %v -> %v\n", preConv.IsSelected, postConv.IsSelected)
+			} else {
+				fmt.Printf("- Selection state unchanged: %v\n", preConv.IsSelected)
+			}
 		}
+	}
+
+	// ============================================
+	// 步骤7：总结和评估
+	// ============================================
+	fmt.Printf("\n--- Step 7: Summary & Evaluation ---\n")
+
+	// 计算验证信号通过数
+	passedSignals := 0
+	for _, passed := range verificationSignals {
+		if passed {
+			passedSignals++
+		}
+	}
+
+	totalSignals := len(verificationSignals)
+	fmt.Printf("Verification Signals: %d/%d passed\n", passedSignals, totalSignals)
+
+	// 列出所有信号状态
+	for signal, passed := range verificationSignals {
+		status := "FAIL"
+		if passed { status = "PASS" }
+		fmt.Printf("  %-30s: %s (%s)\n", signal, status, signalDetails[signal])
+	}
+
+	// 多时刻差异分析
+	fmt.Printf("\nMulti-time Difference Analysis (vs click_before):\n")
+	fmt.Printf("%-20s %-12s %-12s %-12s\n", "Time Point", "Diff %", "Left %", "Right %")
+	fmt.Printf("%-20s %-12s %-12s %-12s\n", "--------------------", "------------", "------------", "------------")
+
+	for _, tp := range timePoints[1:] { // 跳过click_before
+		if tp.DiffResult.TotalPixels > 0 {
+			fmt.Printf("%-20s %-12.2f %-12.2f %-12.2f\n",
+				tp.TimeLabel,
+				tp.DiffResult.DifferencePercent,
+				tp.DiffResult.LeftSidePercent,
+				tp.DiffResult.RightSidePercent)
+		}
+	}
+
+	// 总体评估
+	fmt.Printf("\nOverall Assessment:\n")
+	if passedSignals >= 2 {
+		fmt.Printf("✓ STRONG INDICATION: Click likely hit the target conversation item\n")
+		fmt.Printf("  Multiple verification signals detected significant interface changes\n")
+	} else if passedSignals == 1 {
+		fmt.Printf("○ WEAK INDICATION: Click may have hit the target\n")
+		fmt.Printf("  Only one verification signal detected, changes may be subtle\n")
 	} else {
-		fmt.Printf("- Cannot compare same index (after detection has %d items)\n", len(afterResult.ConversationRects))
-	}
-
-	// 验证方法4：检测到的会话项数量变化
-	if len(beforeResult.ConversationRects) != len(afterResult.ConversationRects) {
-		fmt.Printf("- Conversation count changed: %d -> %d (may indicate scrolling)\n",
-			len(beforeResult.ConversationRects), len(afterResult.ConversationRects))
-	}
-
-	// 验证方法5：检测特征统计变化
-	// avatarDiff := afterResult.DetectedFeatures["avatars"] - beforeResult.DetectedFeatures["avatars"]
-	// textDiff := afterResult.DetectedFeatures["text_regions"] - beforeResult.DetectedFeatures["text_regions"]
-	selectedDiff := afterResult.DetectedFeatures["selected_items"] - beforeResult.DetectedFeatures["selected_items"]
-
-	if selectedDiff != 0 {
-		verificationPassed = true
-		verificationMethods = append(verificationMethods, "selected_count_changed")
-		fmt.Printf("✓ Selected items count changed: %+d\n", selectedDiff)
-	}
-
-	fmt.Println()
-
-	// 步骤6：总结
-	fmt.Printf("--- Step 6: Summary ---\n")
-	fmt.Printf("Click Execution: %s\n", "SUCCESS")
-	fmt.Printf("Verification: %s\n", map[bool]string{true: "PASSED", false: "FAILED"}[verificationPassed])
-	if verificationPassed {
-		fmt.Printf("Verification Methods: %s\n", strings.Join(verificationMethods, ", "))
-		fmt.Printf("Conclusion: Click appears to have triggered interface changes\n")
-	} else {
-		fmt.Printf("Verification Methods: none detected\n")
-		fmt.Printf("Conclusion: Click executed but no clear interface changes detected\n")
-		fmt.Printf("  Possible reasons:\n")
+		fmt.Printf("✗ NO CLEAR INDICATION: Click may have missed or had no effect\n")
+		fmt.Printf("  No verification signals detected, possible reasons:\n")
 		fmt.Printf("  - Click hit wrong area\n")
-		fmt.Printf("  - Interface changes are subtle\n")
-		fmt.Printf("  - Verification methods insufficient\n")
+		fmt.Printf("  - Interface changes are too subtle for pixel diff\n")
 		fmt.Printf("  - Item was already selected\n")
+		fmt.Printf("  - Verification thresholds too high\n")
 	}
-	fmt.Println()
 
-	// 步骤7：调试信息
-	fmt.Printf("--- Step 7: Debug Information ---\n")
-	if beforeResult.DebugImagePath != "" {
-		fmt.Printf("Pre-click debug image: %s\n", beforeResult.DebugImagePath)
-	}
-	if afterResult.DebugImagePath != "" {
-		fmt.Printf("Post-click debug image: %s\n", afterResult.DebugImagePath)
-	}
-	fmt.Printf("Processing time: pre=%v, post=%v\n", beforeResult.ProcessingTime, afterResult.ProcessingTime)
+	// 点击策略评估
+	fmt.Printf("\nClick Strategy Analysis:\n")
+	fmt.Printf("  Strategy used: %s\n", clickSource)
+	fmt.Printf("  Coordinates: (%d, %d)\n", x, y)
+	fmt.Printf("  Recommended for next test: ")
 
-	fmt.Println("=== Click Conversation Complete ===")
+	if verificationSignals["clicked_region_pixel_diff"] && verificationSignals["selection_state_changed"] {
+		fmt.Printf("Current strategy (%s) works well\n", clickSource)
+	} else if signalDetails["change_location"] == "predominantly_left" {
+		fmt.Printf("Try avatar_center or left_quarter_center\n")
+	} else {
+		fmt.Printf("Try different strategy (avatar_center, text_center, etc.)\n")
+	}
+
+	fmt.Printf("\n=== Enhanced Click Conversation Complete ===\n")
+}
+
+// max 辅助函数
+func max(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 // abs 绝对值辅助函数
