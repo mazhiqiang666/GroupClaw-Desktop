@@ -624,14 +624,22 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 
 	// 尝试获取可访问对象
 	pAcc, result := b.GetAccessible(windowHandle)
+	effectiveHandle := windowHandle
+	triedChildWindows := false
+	childWindowSelected := false
+	switchReason := ""
+	topLevelChildCount := uintptr(0)
+
 	if result.Status != adapter.StatusSuccess {
-		// 首先尝试子窗口
+		// 失败时尝试子窗口
 		childHandle, childAcc, childResult := b.tryChildWindows(windowHandle)
+		triedChildWindows = true
 		if childResult.Status == adapter.StatusSuccess && childAcc != nil {
-			// 使用找到的子窗口句柄和可访问对象
-			effectiveHandle := childHandle
+			effectiveHandle = childHandle
 			pAcc = childAcc
 			result = childResult
+			childWindowSelected = true
+			switchReason = "top_level_accessible_failed"
 
 			// 更新窗口信息为子窗口信息
 			childInfo, childInfoResult := b.GetWindowInfo(effectiveHandle)
@@ -649,6 +657,7 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 					"child_handle":  strconv.FormatUint(uint64(effectiveHandle), 10),
 					"child_class":   info.Class,
 					"child_title":   info.Title,
+					"switch_reason": switchReason,
 				},
 			})
 		} else {
@@ -714,6 +723,10 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 					"bridge_issue":               "true",
 					"bridge_layer_blocked":       "true",
 					"diagnostic_summary":         fmt.Sprintf("AccessibleObjectFromWindow failed with code %s, no valid child window found", result.ReasonCode),
+					"tried_child_windows":        "true",
+					"child_window_selected":      "false",
+					"effective_window_handle":    strconv.FormatUint(uint64(windowHandle), 10),
+					"switch_reason":              "top_level_accessible_failed_no_child",
 				},
 			})
 
@@ -721,6 +734,42 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 				Status:     adapter.StatusSuccess,
 				ReasonCode: adapter.ReasonOK,
 				Diagnostics: diagnostics,
+			}
+		}
+	} else {
+		// GetAccessible 成功，检查子节点数量
+		topLevelChildCount = b.getAccChildCount(pAcc)
+		if topLevelChildCount == 0 {
+			// 成功但空树，尝试子窗口
+			childHandle, childAcc, childResult := b.tryChildWindows(windowHandle)
+			triedChildWindows = true
+			if childResult.Status == adapter.StatusSuccess && childAcc != nil {
+				effectiveHandle = childHandle
+				pAcc = childAcc
+				result = childResult
+				childWindowSelected = true
+				switchReason = "top_level_accessible_but_empty"
+
+				// 更新窗口信息为子窗口信息
+				childInfo, childInfoResult := b.GetWindowInfo(effectiveHandle)
+				if childInfoResult.Status == adapter.StatusSuccess {
+					info = childInfo
+				}
+
+				// 添加诊断信息表明我们使用了子窗口
+				childResult.Diagnostics = append(childResult.Diagnostics, adapter.Diagnostic{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Using child window because top-level accessible tree is empty",
+					Context: map[string]string{
+						"parent_handle": strconv.FormatUint(uint64(windowHandle), 10),
+						"child_handle":  strconv.FormatUint(uint64(effectiveHandle), 10),
+						"child_class":   info.Class,
+						"child_title":   info.Title,
+						"switch_reason": switchReason,
+						"top_level_child_count": "0",
+					},
+				})
 			}
 		}
 	}
@@ -744,19 +793,6 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 	diagnostics := []adapter.Diagnostic{}
 	// 添加GetAccessible的诊断信息
 	diagnostics = append(diagnostics, result.Diagnostics...)
-	// 添加枚举诊断
-	fallbackUsed := "false"
-	effectiveWindowHandle := windowHandle
-	if result.Diagnostics != nil {
-		for _, diag := range result.Diagnostics {
-			if diag.Context != nil && diag.Context["child_handle"] != "" {
-				fallbackUsed = "true"
-				parsedHandle, _ := strconv.ParseUint(diag.Context["child_handle"], 10, 64)
-				effectiveWindowHandle = uintptr(parsedHandle)
-				break
-			}
-		}
-	}
 
 	// 扁平化所有节点用于统计
 	allNodes := []AccessibleNode{rootNode}
@@ -772,19 +808,24 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 		Message:   "EnumerateAccessibleNodes succeeded",
 		Context: map[string]string{
 			"window_handle":           strconv.FormatUint(uint64(windowHandle), 10),
-			"effective_window_handle": strconv.FormatUint(uint64(effectiveWindowHandle), 10),
+			"effective_window_handle": strconv.FormatUint(uint64(effectiveHandle), 10),
 			"window_class":            info.Class,
 			"window_title":            info.Title,
 			"accessible_obtained":     "true",
 			"root_child_count":        strconv.FormatUint(uint64(childCount), 10),
 			"children_enumerated":     strconv.Itoa(len(children)),
 			"total_nodes_count":       strconv.Itoa(len(allNodes)),
-			"fallback_used":           fallbackUsed,
+			"fallback_used":           strconv.FormatBool(childWindowSelected),
 			"root_name":               info.Title,
 			"root_role":               "window",
 			"objid_client":            "0xFFFFFFFC",
 			"bridge_layer_status":     "success",
 			"diagnostic_summary":      fmt.Sprintf("Got accessible subtree with %d total nodes, root child count: %d", len(allNodes), childCount),
+			"top_level_child_count":   strconv.FormatUint(uint64(topLevelChildCount), 10),
+			"tried_child_windows":     strconv.FormatBool(triedChildWindows),
+			"child_window_selected":   strconv.FormatBool(childWindowSelected),
+			"effective_child_count":   strconv.FormatUint(uint64(childCount), 10),
+			"switch_reason":           switchReason,
 		},
 	})
 
