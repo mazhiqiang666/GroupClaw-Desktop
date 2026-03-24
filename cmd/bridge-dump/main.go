@@ -2315,6 +2315,12 @@ func probeInputBox(bridge windows.BridgeInterface, handle uintptr, candidateInde
 		if len(probeResult.ActivationSignals) > 0 {
 			fmt.Printf("  Activation Signals: %v\n", probeResult.ActivationSignals)
 		}
+		if len(probeResult.WeakSignals) > 0 {
+			fmt.Printf("  Weak Signals: %v\n", probeResult.WeakSignals)
+		}
+		if len(probeResult.StrongSignals) > 0 {
+			fmt.Printf("  Strong Signals: %v\n", probeResult.StrongSignals)
+		}
 		if probeResult.RejectedReason != "" {
 			fmt.Printf("  Rejected Reason: %s\n", probeResult.RejectedReason)
 		}

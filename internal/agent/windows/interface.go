@@ -30,6 +30,8 @@ type InputBoxProbeResult struct {
 	CandidateIndex     int               `json:"candidate_index"`
 	ActivationScore    float64           `json:"activation_score"`
 	ActivationSignals  []string          `json:"activation_signals"`
+	WeakSignals        []string          `json:"weak_signals"`      // 弱信号（位置稳定等）
+	StrongSignals      []string          `json:"strong_signals"`    // 强信号（视觉变化、焦点变化等）
 	EditableConfidence float64           `json:"editable_confidence"`
 	RejectedReason     string            `json:"rejected_reason"`
 	BeforeImage        []byte            `json:"-"` // 不序列化

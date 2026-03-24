@@ -929,16 +929,73 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 			visionResult.WindowWidth,
 			visionResult.WindowHeight,
 		)
-		// Select the best candidate (highest activation score)
-		if len(candidates) > 0 {
-			bestCandidate := candidates[0]
-			for _, candidate := range candidates {
-				if candidate.ActivationScore > bestCandidate.ActivationScore {
-					bestCandidate = candidate
+
+		// 阈值配置
+		const activationScoreThreshold = 50.0
+		const minStrongSignals = 1
+
+		// 对每个候选进行probe验证
+		var validatedCandidates []windows.InputBoxCandidate
+		for _, candidate := range candidates {
+			probeResult, probeErr := a.bridge.ProbeInputBoxCandidate(
+				conv.HostWindowHandle,
+				candidate,
+				"input_left_quarter", // 使用已验证有效的策略
+			)
+			if probeErr.Status == adapter.StatusSuccess {
+				// 检查是否满足阈值条件
+				if probeResult.ActivationScore >= activationScoreThreshold &&
+					len(probeResult.StrongSignals) >= minStrongSignals {
+					// 更新候选的激活分数和信号
+					candidate.ActivationScore = probeResult.ActivationScore
+					candidate.ActivationSignals = probeResult.ActivationSignals
+					candidate.EditableConfidence = probeResult.EditableConfidence
+					validatedCandidates = append(validatedCandidates, candidate)
 				}
 			}
-			inputBoxRect = bestCandidate.Rect
 		}
+
+		// 如果没有候选满足阈值条件，中止发送
+		if len(validatedCandidates) == 0 {
+			// 构建top candidates摘要
+			topCandidatesSummary := ""
+			for i, candidate := range candidates {
+				if i < 3 { // 只显示前3个
+					topCandidatesSummary += fmt.Sprintf("Candidate %d: score=%d, rect=%v; ",
+						i, candidate.Score, candidate.Rect)
+				}
+			}
+
+			return adapter.Result{
+				Status:     adapter.StatusFailed,
+				ReasonCode: adapter.ReasonCode("INPUT_BOX_NOT_CONFIDENT"),
+				Error:      "No input box candidate meets activation threshold",
+				ElapsedMs:  time.Since(startTime).Milliseconds(),
+				Diagnostics: []adapter.Diagnostic{
+					{
+						Timestamp: time.Now(),
+						Level:     "error",
+						Message:   "Input box confidence check failed",
+						Context: map[string]string{
+							"candidate_count":     strconv.Itoa(len(candidates)),
+							"validated_count":     "0",
+							"activation_threshold": fmt.Sprintf("%.1f", activationScoreThreshold),
+							"min_strong_signals":  strconv.Itoa(minStrongSignals),
+							"top_candidates":      topCandidatesSummary,
+						},
+					},
+				},
+			}
+		}
+
+		// Select the best candidate (highest activation score)
+		bestCandidate := validatedCandidates[0]
+		for _, candidate := range validatedCandidates {
+			if candidate.ActivationScore > bestCandidate.ActivationScore {
+				bestCandidate = candidate
+			}
+		}
+		inputBoxRect = bestCandidate.Rect
 
 		if inputBoxResult.Status == adapter.StatusSuccess {
 			// 1. 捕获输入框点击前截图

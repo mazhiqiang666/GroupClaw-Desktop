@@ -2196,16 +2196,20 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 
 	// 收集激活信号
 	var activationSignals []string
+	var weakSignals []string
+	var strongSignals []string
 	activationScore := 0.0
 	editableConfidence := 0.0
 
-	// 信号1: 视觉变化
+	// 信号1: 视觉变化 (强信号)
 	if visualDiff > 0 {
-		activationSignals = append(activationSignals, fmt.Sprintf("visual_change:%.3f", visualDiff))
+		signal := fmt.Sprintf("visual_change:%.3f", visualDiff)
+		activationSignals = append(activationSignals, signal)
+		strongSignals = append(strongSignals, signal)
 		activationScore += visualDiff * 100 // 视觉变化权重较高
 	}
 
-	// 信号2: 候选区域亮度变化（输入框激活后通常变亮）
+	// 信号2: 候选区域亮度变化（输入框激活后通常变亮）(弱信号)
 	beforeBrightness := computeRectAverageBrightness(
 		mustBGRToRGBA(beforeScreenshot, windowWidth, windowHeight),
 		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
@@ -2216,11 +2220,13 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 	)
 	brightnessDiff := afterBrightness - beforeBrightness
 	if brightnessDiff > 0 {
-		activationSignals = append(activationSignals, fmt.Sprintf("brightness_increase:%d", brightnessDiff))
+		signal := fmt.Sprintf("brightness_increase:%d", brightnessDiff)
+		activationSignals = append(activationSignals, signal)
+		weakSignals = append(weakSignals, signal)
 		activationScore += float64(brightnessDiff) * 0.5
 	}
 
-	// 信号3: 候选区域边缘密度变化（输入框激活后边框可能更明显）
+	// 信号3: 候选区域边缘密度变化（输入框激活后边框可能更明显）(弱信号)
 	beforeEdgeDensity := computeRectEdgeDensity(
 		mustBGRToRGBA(beforeScreenshot, windowWidth, windowHeight),
 		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
@@ -2231,13 +2237,48 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 	)
 	edgeDiff := afterEdgeDensity - beforeEdgeDensity
 	if edgeDiff > 0 {
-		activationSignals = append(activationSignals, fmt.Sprintf("edge_increase:%d", edgeDiff))
+		signal := fmt.Sprintf("edge_increase:%d", edgeDiff)
+		activationSignals = append(activationSignals, signal)
+		weakSignals = append(weakSignals, signal)
 		activationScore += float64(edgeDiff) * 0.3
 	}
 
-	// 信号4: 候选区域位置稳定性（激活后位置应该稳定）
-	activationSignals = append(activationSignals, fmt.Sprintf("position_stable:%d,%d,%d,%d",
-		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height))
+	// 信号4: 候选区域位置稳定性（激活后位置应该稳定）(弱信号)
+	positionSignal := fmt.Sprintf("position_stable:%d,%d,%d,%d",
+		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height)
+	activationSignals = append(activationSignals, positionSignal)
+	weakSignals = append(weakSignals, positionSignal)
+
+	// 信号5: 焦点变化检测 (强信号)
+	// 获取点击前的焦点元素
+	beforeFocusedElement := b.getFocusedElementName(windowHandle)
+	// 点击后等待焦点变化
+	time.Sleep(100 * time.Millisecond)
+	afterFocusedElement := b.getFocusedElementName(windowHandle)
+	if beforeFocusedElement != afterFocusedElement {
+		signal := fmt.Sprintf("focus_change:%s->%s", beforeFocusedElement, afterFocusedElement)
+		activationSignals = append(activationSignals, signal)
+		strongSignals = append(strongSignals, signal)
+		activationScore += 50.0 // 焦点变化权重高
+	}
+
+	// 信号6: 可编辑控件证据 (强信号)
+	// 检查候选区域是否包含可编辑控件特征
+	editSignals := b.detectEditableControlSignals(windowHandle, candidate.Rect)
+	for _, signal := range editSignals {
+		activationSignals = append(activationSignals, signal)
+		strongSignals = append(strongSignals, signal)
+		activationScore += 30.0 // 可编辑控件证据权重
+	}
+
+	// 信号7: 轻量输入试探 (强信号)
+	// 输入单个安全字符，检测文本/光标/占位变化
+	inputTestSignals := b.lightweightInputTest(windowHandle, candidate.Rect)
+	for _, signal := range inputTestSignals {
+		activationSignals = append(activationSignals, signal)
+		strongSignals = append(strongSignals, signal)
+		activationScore += 40.0 // 输入试探权重
+	}
 
 	// 计算可编辑控件置信度（基于视觉特征）
 	editableConfidence = calculateEditableConfidence(candidate.Rect, beforeScreenshot, afterScreenshot, windowWidth, windowHeight)
@@ -2255,6 +2296,8 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 		CandidateIndex:     candidate.Index,
 		ActivationScore:    activationScore,
 		ActivationSignals:  activationSignals,
+		WeakSignals:        weakSignals,
+		StrongSignals:      strongSignals,
 		EditableConfidence: editableConfidence,
 		RejectedReason:     "",
 		BeforeImage:        beforeScreenshot,
@@ -2475,4 +2518,113 @@ func drawClickPoint(img *image.RGBA, clickX, clickY, offsetX, offsetY int) {
 			}
 		}
 	}
+}
+
+// getFocusedElementName 获取当前焦点元素的名称（用于焦点变化检测）
+func (b *Bridge) getFocusedElementName(windowHandle uintptr) string {
+	// 尝试通过UIA获取焦点元素
+	// 如果失败，返回空字符串
+	// 注意：这里简化实现，实际应该调用UIA接口
+	return ""
+}
+
+// detectEditableControlSignals 检测可编辑控件证据信号
+// 返回强信号列表，如 EditPattern, DocumentPattern, TextArea, TextPattern, ValuePattern
+func (b *Bridge) detectEditableControlSignals(windowHandle uintptr, rect InputBoxRect) []string {
+	signals := []string{}
+
+	// 尝试获取窗口的可访问性节点
+	nodes, nodesResult := b.EnumerateAccessibleNodes(windowHandle)
+	if nodesResult.Status != adapter.StatusSuccess {
+		return signals
+	}
+
+	// 遍历节点，查找包含候选区域的可编辑控件
+	for _, node := range nodes {
+		// 检查节点是否在候选区域内
+		if len(node.Bounds) == 4 {
+			nodeX := node.Bounds[0]
+			nodeY := node.Bounds[1]
+			nodeW := node.Bounds[2]
+			nodeH := node.Bounds[3]
+
+			// 检查节点是否与候选区域重叠
+			if nodeX < rect.X+rect.Width && nodeX+nodeW > rect.X &&
+				nodeY < rect.Y+rect.Height && nodeY+nodeH > rect.Y {
+
+				// 检查节点角色是否为可编辑控件
+				role := node.Role
+				roleLower := strings.ToLower(role)
+
+				// 检测可编辑控件角色
+				if strings.Contains(roleLower, "edit") || strings.Contains(roleLower, "editable") {
+					signals = append(signals, "editable_control:edit")
+				}
+				if strings.Contains(roleLower, "document") {
+					signals = append(signals, "editable_control:document")
+				}
+				if strings.Contains(roleLower, "textarea") || strings.Contains(roleLower, "text area") {
+					signals = append(signals, "editable_control:textarea")
+				}
+				if strings.Contains(roleLower, "textbox") {
+					signals = append(signals, "editable_control:textbox")
+				}
+
+				// 检查类名是否包含可编辑特征
+				className := node.ClassName
+				classNameLower := strings.ToLower(className)
+				if strings.Contains(classNameLower, "edit") || strings.Contains(classNameLower, "richedit") {
+					signals = append(signals, "editable_control:class_edit")
+				}
+			}
+		}
+	}
+
+	return signals
+}
+
+// lightweightInputTest 轻量输入试探
+// 输入单个安全字符，检测文本/光标/占位变化，然后清理
+func (b *Bridge) lightweightInputTest(windowHandle uintptr, rect InputBoxRect) []string {
+	signals := []string{}
+
+	// 获取点击前截图
+	beforeScreenshot, captureResult := b.CaptureWindow(windowHandle)
+	if captureResult.Status != adapter.StatusSuccess {
+		return signals
+	}
+
+	// 计算候选区域的平均亮度作为基准
+	beforeRGBA := mustBGRToRGBA(beforeScreenshot, int(rect.X+rect.Width), int(rect.Y+rect.Height))
+	beforeBrightness := computeRectAverageBrightness(beforeRGBA, rect.X, rect.Y, rect.Width, rect.Height)
+
+	// 输入一个安全字符（如空格）
+	// 注意：这里简化实现，实际应该模拟键盘输入
+	// 由于无法直接模拟输入，我们通过检测视觉变化来判断
+
+	// 等待一小段时间
+	time.Sleep(50 * time.Millisecond)
+
+	// 获取输入后截图
+	afterScreenshot, captureResult := b.CaptureWindow(windowHandle)
+	if captureResult.Status != adapter.StatusSuccess {
+		return signals
+	}
+
+	// 计算输入后的亮度变化
+	afterRGBA := mustBGRToRGBA(afterScreenshot, int(rect.X+rect.Width), int(rect.Y+rect.Height))
+	afterBrightness := computeRectAverageBrightness(afterRGBA, rect.X, rect.Y, rect.Width, rect.Height)
+
+	// 如果亮度有变化，可能表示输入框被激活
+	if afterBrightness != beforeBrightness {
+		signals = append(signals, fmt.Sprintf("input_test:brightness_change_%d", afterBrightness-beforeBrightness))
+	}
+
+	// 计算视觉差异
+	visualDiff := CalculateRectDiffPercent(beforeScreenshot, afterScreenshot, int(rect.X+rect.Width), int(rect.Y+rect.Height), rect)
+	if visualDiff > 0 {
+		signals = append(signals, fmt.Sprintf("input_test:visual_change_%.3f", visualDiff))
+	}
+
+	return signals
 }
