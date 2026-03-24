@@ -217,7 +217,7 @@ task test-all
 | 功能 | 命令 | 说明 |
 |------|------|------|
 | 查找窗口 | `find-window` | 查找 WeChat 窗口 |
-| 列出节点 | `list-nodes <handle>` | 列出可访问性节点 |
+| 列出会话 | `list-conversations` | 列出会话列表（scan 的别名） |
 | 扫描会话 | `scan` | 扫描会话列表 |
 | 聚焦会话 | `focus --contact <name>` | 切换到目标会话 |
 | 发送消息 | `send --contact <name> --message <content>` | 发送消息到会话 |
@@ -448,6 +448,7 @@ go build ./...
 - [02-工程约束设计稿.md](开发日志/02-工程约束设计稿.md)
 - [03-工程骨架设计.md](开发日志/03-工程骨架设计.md)
 - [04-骨架代码设计.md](开发日志/04-骨架代码设计.md)
+- [WeChat 调试指南](docs/debugging.md)
 
 ### 已完成工作
 

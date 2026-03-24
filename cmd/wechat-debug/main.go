@@ -5,7 +5,6 @@ import (
 	"flag"
 	"fmt"
 	"log"
-	"strconv"
 	"time"
 
 	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
@@ -166,15 +165,8 @@ func main() {
 	switch command {
 	case "find-window":
 		findWeChatWindow(executor)
-	case "list-nodes":
-		if len(args) < 2 {
-			log.Fatal("Usage: wechat-debug list-nodes <window-handle>")
-		}
-		handle, err := strconv.ParseUint(args[1], 10, 64)
-		if err != nil {
-			log.Fatalf("Invalid window handle: %v", err)
-		}
-		listNodes(executor, uintptr(handle))
+	case "list-conversations":
+		listConversations(executor)
 	case "scan":
 		scanConversations(executor)
 	case "focus":
@@ -206,7 +198,7 @@ func printUsage() {
 	fmt.Println("")
 	fmt.Println("Usage:")
 	fmt.Println("  wechat-debug find-window              - Find WeChat window(s)")
-	fmt.Println("  wechat-debug list-nodes <handle>      - List accessibility nodes")
+	fmt.Println("  wechat-debug list-conversations       - List conversations (alias for scan)")
 	fmt.Println("  wechat-debug scan                     - Scan conversation list")
 	fmt.Println("  wechat-debug focus --contact <name>   - Focus on specific contact")
 	fmt.Println("  wechat-debug send --contact <name> [--message <content>] - Send message to contact")
@@ -222,7 +214,7 @@ func printUsage() {
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  wechat-debug find-window")
-	fmt.Println("  wechat-debug list-nodes 123456")
+	fmt.Println("  wechat-debug list-conversations")
 	fmt.Println("  wechat-debug scan")
 	fmt.Println("  wechat-debug focus --contact \"张三\"")
 	fmt.Println("  wechat-debug send --contact \"张三\" --message \"Hello from debug script\"")
@@ -258,7 +250,7 @@ func findWeChatWindow(executor *UnifiedExecutor) {
 	}
 }
 
-func listNodes(executor *UnifiedExecutor, windowHandle uintptr) {
+func listConversations(executor *UnifiedExecutor) {
 	instances, _, err := executor.RunDetect()
 	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
@@ -271,7 +263,7 @@ func listNodes(executor *UnifiedExecutor, windowHandle uintptr) {
 
 	if *jsonOutput {
 		step := StepTrace{
-			Step:          "list-nodes",
+			Step:          "list-conversations",
 			Status:        string(scanResult.Status),
 			Confidence:    scanResult.Confidence,
 			Conversations: conversations,
