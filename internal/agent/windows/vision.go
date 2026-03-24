@@ -731,3 +731,78 @@ func (b *Bridge) DetectConversations(windowHandle uintptr) (VisionDebugResult, a
 		Diagnostics: diagnostics,
 	}
 }
+
+// GetConversationClickPoint 获取会话项的点击坐标
+func (b *Bridge) GetConversationClickPoint(result VisionDebugResult, index int) (x, y int, clickSource string, diag adapter.Diagnostic) {
+	if index < 0 || index >= len(result.ConversationRects) {
+		return 0, 0, "invalid_index", adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   "Invalid conversation index",
+			Context: map[string]string{
+				"requested_index": strconv.Itoa(index),
+				"total_conversations": strconv.Itoa(len(result.ConversationRects)),
+			},
+		}
+	}
+
+	conv := result.ConversationRects[index]
+
+	// 1. 优先点击头像区域中心
+	if conv.HasAvatar && conv.AvatarRect[2] > 0 && conv.AvatarRect[3] > 0 {
+		x = conv.AvatarRect[0] + conv.AvatarRect[2]/2
+		y = conv.AvatarRect[1] + conv.AvatarRect[3]/2
+		return x, y, "avatar_center", adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   "Click point calculated from avatar center",
+			Context: map[string]string{
+				"index": strconv.Itoa(index),
+				"avatar_x": strconv.Itoa(conv.AvatarRect[0]),
+				"avatar_y": strconv.Itoa(conv.AvatarRect[1]),
+				"avatar_width": strconv.Itoa(conv.AvatarRect[2]),
+				"avatar_height": strconv.Itoa(conv.AvatarRect[3]),
+				"click_x": strconv.Itoa(x),
+				"click_y": strconv.Itoa(y),
+			},
+		}
+	}
+
+	// 2. 其次点击文本区域中心
+	if conv.HasText && conv.TextRect[2] > 0 && conv.TextRect[3] > 0 {
+		x = conv.TextRect[0] + conv.TextRect[2]/2
+		y = conv.TextRect[1] + conv.TextRect[3]/2
+		return x, y, "text_center", adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   "Click point calculated from text center",
+			Context: map[string]string{
+				"index": strconv.Itoa(index),
+				"text_x": strconv.Itoa(conv.TextRect[0]),
+				"text_y": strconv.Itoa(conv.TextRect[1]),
+				"text_width": strconv.Itoa(conv.TextRect[2]),
+				"text_height": strconv.Itoa(conv.TextRect[3]),
+				"click_x": strconv.Itoa(x),
+				"click_y": strconv.Itoa(y),
+			},
+		}
+	}
+
+	// 3. 最后点击会话项矩形中心
+	x = conv.X + conv.Width/2
+	y = conv.Y + conv.Height/2
+	return x, y, "rect_center", adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     "info",
+		Message:   "Click point calculated from conversation rectangle center",
+		Context: map[string]string{
+			"index": strconv.Itoa(index),
+			"rect_x": strconv.Itoa(conv.X),
+			"rect_y": strconv.Itoa(conv.Y),
+			"rect_width": strconv.Itoa(conv.Width),
+			"rect_height": strconv.Itoa(conv.Height),
+			"click_x": strconv.Itoa(x),
+			"click_y": strconv.Itoa(y),
+		},
+	}
+}

@@ -7,6 +7,7 @@ import (
 	"log"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
@@ -161,6 +162,19 @@ func main() {
 			lang = args[2]
 		}
 		debugOCR(bridge, uintptr(handle), lang)
+	case "click-conversation":
+		if len(args) < 3 {
+			log.Fatal("Usage: bridge-dump click-conversation <window-handle> <index>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		index, err := strconv.Atoi(args[2])
+		if err != nil {
+			log.Fatalf("Invalid index: %v", err)
+		}
+		clickConversation(bridge, uintptr(handle), index)
 	case "debug-vision":
 		if len(args) < 2 {
 			log.Fatal("Usage: bridge-dump debug-vision <window-handle>")
@@ -193,6 +207,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump debug-ocr <handle> [lang] - Debug: OCR text extraction")
 	fmt.Println("                                         Use --split-regions for region-based OCR")
 	fmt.Println("  bridge-dump debug-vision <handle>     - Debug: Visual conversation detection")
+	fmt.Println("  bridge-dump click-conversation <h> <i> - Click conversation by vision detection index")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
@@ -212,6 +227,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump click-node 123456 \"[3]\"")
 	fmt.Println("  bridge-dump click-node 123456 \"[1].[2]\"")
 	fmt.Println("  bridge-dump diagnose 123456          - Comprehensive bridge diagnostics")
+	fmt.Println("  bridge-dump click-conversation 123456 0 - Click first vision-detected conversation")
 }
 
 func findWeChat(bridge windows.BridgeInterface) {
@@ -1396,5 +1412,176 @@ func debugVision(bridge windows.BridgeInterface, handle uintptr) {
 	}
 
 	fmt.Println("=== Debug Vision Complete ===")
+}
+
+// clickConversation 点击视觉检测到的会话项并验证
+func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int) {
+	fmt.Printf("=== Click Conversation: Handle 0x%X (%d), Index %d ===\n\n", handle, handle, index)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	fmt.Printf("Window Information:\n")
+	fmt.Printf("  Handle: 0x%X (%d)\n", handle, handle)
+	fmt.Printf("  Class: %s\n", info.Class)
+	fmt.Printf("  Title: %s\n", info.Title)
+	fmt.Println()
+
+	// 类型断言以访问视觉检测方法
+	winBridge, ok := bridge.(*windows.Bridge)
+	if !ok {
+		fmt.Printf("ERROR: Failed to cast bridge to *windows.Bridge\n")
+		fmt.Printf("Bridge type: %T\n", bridge)
+		return
+	}
+
+	// 步骤1：点击前视觉检测
+	fmt.Printf("--- Step 1: Pre-click Vision Detection ---\n")
+	beforeResult, result := winBridge.DetectConversations(handle)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to detect conversations before click: %s\n", result.Error)
+		return
+	}
+
+	if index < 0 || index >= len(beforeResult.ConversationRects) {
+		fmt.Printf("ERROR: Invalid conversation index %d (total: %d)\n", index, len(beforeResult.ConversationRects))
+		return
+	}
+
+	fmt.Printf("Pre-click: Detected %d conversation(s)\n", len(beforeResult.ConversationRects))
+	preConv := beforeResult.ConversationRects[index]
+	fmt.Printf("Target Conversation [%d]:\n", index)
+	fmt.Printf("  Position: x=%d, y=%d, w=%d, h=%d\n", preConv.X, preConv.Y, preConv.Width, preConv.Height)
+	fmt.Printf("  Features: avatar=%v, text=%v, unread_dot=%v, selected=%v\n",
+		preConv.HasAvatar, preConv.HasText, preConv.HasUnreadDot, preConv.IsSelected)
+	fmt.Println()
+
+	// 步骤2：计算点击点
+	fmt.Printf("--- Step 2: Calculate Click Point ---\n")
+	x, y, clickSource, clickDiag := winBridge.GetConversationClickPoint(beforeResult, index)
+	fmt.Printf("Click Point Calculation:\n")
+	fmt.Printf("  Coordinates: x=%d, y=%d\n", x, y)
+	fmt.Printf("  Source: %s\n", clickSource)
+	fmt.Printf("  Message: %s\n", clickDiag.Message)
+	for k, v := range clickDiag.Context {
+		fmt.Printf("  %s: %s\n", k, v)
+	}
+	fmt.Println()
+
+	// 步骤3：执行点击
+	fmt.Printf("--- Step 3: Execute Click ---\n")
+	clickResult := winBridge.Click(handle, x, y)
+	if clickResult.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Click failed: %s\n", clickResult.Error)
+		return
+	}
+	fmt.Printf("Click executed successfully\n")
+
+	// 等待一小段时间让界面更新
+	time.Sleep(500 * time.Millisecond)
+
+	// 步骤4：点击后视觉检测
+	fmt.Printf("--- Step 4: Post-click Vision Detection ---\n")
+	afterResult, result := winBridge.DetectConversations(handle)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("WARNING: Failed to detect conversations after click: %s\n", result.Error)
+		fmt.Printf("  (Continuing with minimal verification)\n")
+		// 继续，但可能无法进行完整验证
+	}
+
+	// 步骤5：验证变化
+	fmt.Printf("--- Step 5: Verification ---\n")
+	verificationPassed := false
+	verificationMethods := []string{}
+
+	if len(afterResult.ConversationRects) > index {
+		postConv := afterResult.ConversationRects[index]
+
+		// 验证方法1：选中状态变化
+		if preConv.IsSelected != postConv.IsSelected {
+			verificationPassed = true
+			verificationMethods = append(verificationMethods, "selection_state_changed")
+			fmt.Printf("✓ Selection state changed: %v -> %v\n", preConv.IsSelected, postConv.IsSelected)
+		} else {
+			fmt.Printf("- Selection state unchanged: %v\n", preConv.IsSelected)
+		}
+
+		// 验证方法2：亮度变化（选中项通常较亮）
+		if preConv.IsSelected != postConv.IsSelected {
+			// 如果选中状态改变了，这是一个强信号
+			fmt.Printf("  Strong signal: selection state indicates successful click\n")
+		}
+
+		// 验证方法3：项目位置可能微调（滚动等）
+		positionDiff := abs(postConv.Y - preConv.Y)
+		if positionDiff > 2 && positionDiff < 50 { // 轻微移动但不是大幅滚动
+			verificationPassed = true
+			verificationMethods = append(verificationMethods, "position_adjusted")
+			fmt.Printf("✓ Position adjusted: y diff = %d\n", positionDiff)
+		}
+	} else {
+		fmt.Printf("- Cannot compare same index (after detection has %d items)\n", len(afterResult.ConversationRects))
+	}
+
+	// 验证方法4：检测到的会话项数量变化
+	if len(beforeResult.ConversationRects) != len(afterResult.ConversationRects) {
+		fmt.Printf("- Conversation count changed: %d -> %d (may indicate scrolling)\n",
+			len(beforeResult.ConversationRects), len(afterResult.ConversationRects))
+	}
+
+	// 验证方法5：检测特征统计变化
+	// avatarDiff := afterResult.DetectedFeatures["avatars"] - beforeResult.DetectedFeatures["avatars"]
+	// textDiff := afterResult.DetectedFeatures["text_regions"] - beforeResult.DetectedFeatures["text_regions"]
+	selectedDiff := afterResult.DetectedFeatures["selected_items"] - beforeResult.DetectedFeatures["selected_items"]
+
+	if selectedDiff != 0 {
+		verificationPassed = true
+		verificationMethods = append(verificationMethods, "selected_count_changed")
+		fmt.Printf("✓ Selected items count changed: %+d\n", selectedDiff)
+	}
+
+	fmt.Println()
+
+	// 步骤6：总结
+	fmt.Printf("--- Step 6: Summary ---\n")
+	fmt.Printf("Click Execution: %s\n", "SUCCESS")
+	fmt.Printf("Verification: %s\n", map[bool]string{true: "PASSED", false: "FAILED"}[verificationPassed])
+	if verificationPassed {
+		fmt.Printf("Verification Methods: %s\n", strings.Join(verificationMethods, ", "))
+		fmt.Printf("Conclusion: Click appears to have triggered interface changes\n")
+	} else {
+		fmt.Printf("Verification Methods: none detected\n")
+		fmt.Printf("Conclusion: Click executed but no clear interface changes detected\n")
+		fmt.Printf("  Possible reasons:\n")
+		fmt.Printf("  - Click hit wrong area\n")
+		fmt.Printf("  - Interface changes are subtle\n")
+		fmt.Printf("  - Verification methods insufficient\n")
+		fmt.Printf("  - Item was already selected\n")
+	}
+	fmt.Println()
+
+	// 步骤7：调试信息
+	fmt.Printf("--- Step 7: Debug Information ---\n")
+	if beforeResult.DebugImagePath != "" {
+		fmt.Printf("Pre-click debug image: %s\n", beforeResult.DebugImagePath)
+	}
+	if afterResult.DebugImagePath != "" {
+		fmt.Printf("Post-click debug image: %s\n", afterResult.DebugImagePath)
+	}
+	fmt.Printf("Processing time: pre=%v, post=%v\n", beforeResult.ProcessingTime, afterResult.ProcessingTime)
+
+	fmt.Println("=== Click Conversation Complete ===")
+}
+
+// abs 绝对值辅助函数
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
 }
 
