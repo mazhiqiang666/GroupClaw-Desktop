@@ -2,6 +2,7 @@ package wechat
 
 import (
 	"testing"
+	"time"
 
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
@@ -186,6 +187,58 @@ func (m *controlledMockBridge) SetClipboardText(text string) adapter.Result {
 
 func (m *controlledMockBridge) GetClipboardText() (string, adapter.Result) {
 	return "", adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+	}
+}
+
+func (m *controlledMockBridge) DetectConversations(windowHandle uintptr) (windows.VisionDebugResult, adapter.Result) {
+	// 返回一个模拟的视觉检测结果，包含2个会话矩形
+	rects := []windows.ConversationRect{
+		{
+			Index:        0,
+			X:            10,
+			Y:            50,
+			Width:        180,
+			Height:       40,
+			HasAvatar:    true,
+			HasText:      true,
+			HasUnreadDot: false,
+			IsSelected:   false,
+			AvatarRect:   [4]int{15, 55, 30, 30},
+			TextRect:     [4]int{55, 60, 120, 25},
+		},
+		{
+			Index:        1,
+			X:            10,
+			Y:            90,
+			Width:        180,
+			Height:       40,
+			HasAvatar:    true,
+			HasText:      true,
+			HasUnreadDot: true,
+			IsSelected:   false,
+			AvatarRect:   [4]int{15, 95, 30, 30},
+			TextRect:     [4]int{55, 100, 120, 25},
+			UnreadDotRect: [4]int{5, 100, 8, 8},
+		},
+	}
+	features := map[string]int{
+		"conversation_rects": 2,
+		"avatars": 2,
+		"text_regions": 2,
+		"unread_dots": 1,
+	}
+	return windows.VisionDebugResult{
+		WindowHandle:     windowHandle,
+		WindowWidth:      800,
+		WindowHeight:     600,
+		ImageSize:        1000,
+		LeftSidebarRect:  [4]int{0, 0, 200, 600},
+		ConversationRects: rects,
+		DetectedFeatures: features,
+		ProcessingTime:   100 * time.Millisecond,
+	}, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
 	}
@@ -379,8 +432,10 @@ func TestWeChatAdapter_MinimumClosedLoop_WithControlledNodes(t *testing.T) {
 
 	// Verify conversation properties
 	conv := conversations[0]
-	if conv.DisplayName != "Test Conversation" {
-		t.Errorf("Expected conversation name 'Test Conversation', got '%s'", conv.DisplayName)
+	// With vision scan, DisplayName will be "conversation_0" instead of "Test Conversation"
+	expectedName := "conversation_0"
+	if conv.DisplayName != expectedName {
+		t.Errorf("Expected conversation name '%s', got '%s'", expectedName, conv.DisplayName)
 	}
 
 	// Focus on the controlled conversation

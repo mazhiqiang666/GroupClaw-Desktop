@@ -274,15 +274,12 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 	// 获取窗口信息用于诊断
 	info, infoResult := a.bridge.GetWindowInfo(windowHandle)
 
-	// 使用 bridge 枚举可访问节点
-	nodes, nodeResult := a.bridge.EnumerateAccessibleNodes(windowHandle)
-
-	// 构建诊断信息
+	// 构建诊断信息（提前定义，供视觉和回退路径使用）
 	diagnostics := map[string]string{
 		"window_handle":        strconv.FormatUint(uint64(windowHandle), 10),
 		"window_class":         "",
 		"window_title":         "",
-		"nodes_found":          strconv.Itoa(len(nodes)),
+		"nodes_found":          "0",
 		"candidates_found":     "0",
 		"hits_found":           "0",
 		// Whitelist fields (always present for consistency)
@@ -293,6 +290,80 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 		"delivery_state":       "unknown",
 		"confidence":           "0.00",
 	}
+
+	if infoResult.Status == adapter.StatusSuccess {
+		diagnostics["window_class"] = info.Class
+		diagnostics["window_title"] = info.Title
+	}
+
+	// 优先尝试视觉扫描路线
+	visionResult, visionAdapterResult := a.bridge.DetectConversations(windowHandle)
+	var visualConversations []protocol.ConversationRef
+	if visionAdapterResult.Status == adapter.StatusSuccess && len(visionResult.ConversationRects) > 0 {
+		// 视觉扫描成功，转换为ConversationRef
+		for i, rect := range visionResult.ConversationRects {
+			displayName := fmt.Sprintf("conversation_%d", i)
+			previewText := fmt.Sprintf("rect:%d_%d_%d_%d", rect.X, rect.Y, rect.Width, rect.Height)
+			hints := []string{
+				fmt.Sprintf("visual_index:%d", i),
+				fmt.Sprintf("rect:%d_%d_%d_%d", rect.X, rect.Y, rect.Width, rect.Height),
+			}
+			if rect.HasAvatar {
+				hints = append(hints, "has_avatar")
+			}
+			if rect.HasText {
+				hints = append(hints, "has_text")
+			}
+			if rect.HasUnreadDot {
+				hints = append(hints, "has_unread_dot")
+			}
+			if rect.IsSelected {
+				hints = append(hints, "is_selected")
+			}
+			convRef := protocol.ConversationRef{
+				HostWindowHandle: windowHandle,
+				AppInstance:      instance,
+				DisplayName:      displayName,
+				ListPosition:     i, // 视觉索引直接作为ListPosition
+				PreviewText:      previewText,
+				ListNeighborhoodHint: hints,
+			}
+			visualConversations = append(visualConversations, convRef)
+		}
+		// 更新诊断信息
+		diagnostics["locate_source"] = "vision_scan"
+		diagnostics["visual_conversations_found"] = strconv.Itoa(len(visualConversations))
+		diagnostics["visual_rects_found"] = strconv.Itoa(len(visionResult.ConversationRects))
+		diagnostics["visual_scan_status"] = "success"
+		// 返回视觉扫描结果
+		elapsedMs := time.Since(startTime).Milliseconds()
+		return visualConversations, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Confidence: 1.0,
+			ElapsedMs:  elapsedMs,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Scan completed via vision detection",
+					Context:   diagnostics,
+				},
+			},
+		}
+	}
+	// 视觉扫描失败或未找到矩形，回退到旧的可访问性节点路线
+	diagnostics["visual_scan_status"] = "failed_or_no_rects"
+	if visionAdapterResult.Status != adapter.StatusSuccess {
+		diagnostics["visual_scan_error"] = visionAdapterResult.Error
+	}
+
+	// 使用 bridge 枚举可访问节点
+	nodes, nodeResult := a.bridge.EnumerateAccessibleNodes(windowHandle)
+
+	// 更新诊断信息
+	diagnostics["nodes_found"] = strconv.Itoa(len(nodes))
+	// 其他字段在视觉路径失败时已设置初始值
 
 	if infoResult.Status == adapter.StatusSuccess {
 		diagnostics["window_class"] = info.Class
@@ -1005,21 +1076,22 @@ func (a *WeChatAdapter) convertVisionFocusResult(visionResult windows.VisionFocu
 
 	// 从VerificationSignals中提取关键信号
 	signals := visionResult.VerificationSignals
-	// 尝试提取关键信号
-	if fullWindowChange, ok := signals["full_window_change_percent"].(float64); ok {
-		diagnostics["full_window_change_percent"] = fmt.Sprintf("%.1f", fullWindowChange)
+	// 尝试提取关键信号（使用evaluateFocusSuccess输出的真实key）
+	if fullWindowDiff, ok := signals["full_window_diff_percent"].(float64); ok {
+		diagnostics["full_window_diff_percent"] = fmt.Sprintf("%.1f", fullWindowDiff)
 	}
-	if rightSideChange, ok := signals["right_side_change_percent"].(float64); ok {
-		diagnostics["right_side_change_percent"] = fmt.Sprintf("%.1f", rightSideChange)
+	if rightSideDiff, ok := signals["right_side_diff_percent"].(float64); ok {
+		diagnostics["right_side_diff_percent"] = fmt.Sprintf("%.1f", rightSideDiff)
 	}
-	if clickedRegionChange, ok := signals["clicked_region_change_percent"].(float64); ok {
-		diagnostics["clicked_region_change_percent"] = fmt.Sprintf("%.1f", clickedRegionChange)
+	if clickedRegionDiff, ok := signals["clicked_region_diff_percent"].(float64); ok {
+		diagnostics["clicked_region_diff_percent"] = fmt.Sprintf("%.1f", clickedRegionDiff)
 	}
-	if boundingBoxX, ok := signals["bounding_box_x"].(int); ok {
-		diagnostics["bounding_box_x"] = strconv.Itoa(boundingBoxX)
-	}
-	if boundingBoxWidth, ok := signals["bounding_box_width"].(int); ok {
-		diagnostics["bounding_box_width"] = strconv.Itoa(boundingBoxWidth)
+	// 处理差异边界框
+	if diffBoundingBox, ok := signals["diff_bounding_box"].([4]int); ok {
+		diagnostics["diff_bounding_box_x"] = strconv.Itoa(diffBoundingBox[0])
+		diagnostics["diff_bounding_box_y"] = strconv.Itoa(diffBoundingBox[1])
+		diagnostics["diff_bounding_box_width"] = strconv.Itoa(diffBoundingBox[2])
+		diagnostics["diff_bounding_box_height"] = strconv.Itoa(diffBoundingBox[3])
 	}
 
 	var status adapter.Status

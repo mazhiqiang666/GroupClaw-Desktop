@@ -57,6 +57,9 @@ type BridgeInterface interface {
 
 	// FocusConversationByVision 视觉Focus统一入口
 	FocusConversationByVision(windowHandle uintptr, strategy string, targetIndex int, waitAfterClickMs int) (VisionFocusResult, adapter.Result)
+
+	// DetectConversations 视觉检测会话列表
+	DetectConversations(windowHandle uintptr) (VisionDebugResult, adapter.Result)
 }
 
 // AccessibleNode 可访问节点信息
