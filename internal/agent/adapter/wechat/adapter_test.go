@@ -155,6 +155,20 @@ func (m *mockBridge) Click(handle uintptr, x, y int) adapter.Result {
 	}
 }
 
+func (m *mockBridge) FocusConversationByVision(windowHandle uintptr, strategy string, targetIndex int, waitAfterClickMs int) (windows.VisionFocusResult, adapter.Result) {
+	// 返回一个默认的失败结果，模拟视觉Focus失败，让测试走旧路径
+	return windows.VisionFocusResult{
+		WindowHandle:   windowHandle,
+		TargetIndex:    targetIndex,
+		ClickStrategy:  strategy,
+		FocusSucceeded: false,
+		FocusConfidence: 0.3,
+	}, adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+	}
+}
+
 func (m *mockBridge) SetClipboardText(text string) adapter.Result {
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,

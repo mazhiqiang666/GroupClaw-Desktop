@@ -401,6 +401,38 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 		return focusWindowResult
 	}
 
+	// 2. 优先尝试视觉Focus路线
+	visionResult, visionAdapterResult := a.bridge.FocusConversationByVision(
+		conv.HostWindowHandle,
+		"rect_center", // 默认策略：点击会话项矩形中心
+		conv.ListPosition, // 使用ListPosition作为目标索引
+		800, // 点击后等待800ms
+	)
+
+	// 如果视觉Focus成功（状态成功且focus_succeeded为true），直接返回
+	if visionAdapterResult.Status == adapter.StatusSuccess && visionResult.FocusSucceeded {
+		// 将VisionFocusResult映射到adapter.Result
+		return a.convertVisionFocusResult(visionResult, startTime, "vision")
+	}
+
+	// 3. 视觉Focus失败或未完全成功，回退到旧的可访问性节点路线
+	// 记录视觉Focus尝试的诊断信息
+	visionDiagLevel := "info"
+	if visionAdapterResult.Status != adapter.StatusSuccess {
+		visionDiagLevel = "warn"
+	} else if !visionResult.FocusSucceeded {
+		visionDiagLevel = "warn"
+	}
+
+	visionDiagMessage := "Vision focus attempted"
+	if visionAdapterResult.Status != adapter.StatusSuccess {
+		visionDiagMessage = fmt.Sprintf("Vision focus failed with status: %s", visionAdapterResult.Status)
+	} else if !visionResult.FocusSucceeded {
+		visionDiagMessage = fmt.Sprintf("Vision focus verification failed (confidence: %.2f)", visionResult.FocusConfidence)
+	}
+
+	// 继续原有逻辑...
+
 	// 2. 重新枚举节点以找到目标会话的 bounds
 	nodes, nodeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
 	if nodeResult.Status != adapter.StatusSuccess {
@@ -477,16 +509,32 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 	diagnostics["click_y"] = strconv.Itoa(clickY)
 	diagnostics["elapsed_ms"] = strconv.FormatInt(elapsedMs, 10)
 
+	// 添加视觉尝试的诊断信息
+	visionAttemptDiagnostic := adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     visionDiagLevel,
+		Message:   visionDiagMessage,
+		Context: map[string]string{
+			"vision_focus_attempted": "true",
+			"vision_focus_status":    string(visionAdapterResult.Status),
+			"vision_focus_succeeded": strconv.FormatBool(visionResult.FocusSucceeded),
+			"vision_focus_confidence": fmt.Sprintf("%.2f", visionResult.FocusConfidence),
+			"vision_click_strategy":   "rect_center",
+			"vision_target_index":     strconv.Itoa(conv.ListPosition),
+		},
+	}
+
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
 		Confidence: assessment.Confidence,
 		ElapsedMs:  elapsedMs,
 		Diagnostics: []adapter.Diagnostic{
+			visionAttemptDiagnostic,
 			{
 				Timestamp: time.Now(),
 				Level:     "info",
-				Message:   "Focus completed with verification",
+				Message:   "Focus completed with verification (fallback to accessibility)",
 				Context:   diagnostics,
 			},
 		},
@@ -925,6 +973,79 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 				Timestamp: time.Now(),
 				Level:     "info",
 				Message:   "Verification completed with strong validation",
+				Context:   diagnostics,
+			},
+		},
+	}
+}
+
+// convertVisionFocusResult 将VisionFocusResult转换为adapter.Result
+func (a *WeChatAdapter) convertVisionFocusResult(visionResult windows.VisionFocusResult, startTime time.Time, locateSource string) adapter.Result {
+	elapsedMs := time.Since(startTime).Milliseconds()
+
+	// 构建诊断信息
+	diagnostics := map[string]string{
+		"locate_source":        locateSource,
+		"focus_succeeded":      strconv.FormatBool(visionResult.FocusSucceeded),
+		"focus_confidence":     fmt.Sprintf("%.2f", visionResult.FocusConfidence),
+		"click_strategy":       visionResult.ClickStrategy,
+		"click_x":              strconv.Itoa(visionResult.ClickX),
+		"click_y":              strconv.Itoa(visionResult.ClickY),
+		"click_source":         visionResult.ClickSource,
+		"target_index":         strconv.Itoa(visionResult.TargetIndex),
+		"success_reasons":      strings.Join(visionResult.SuccessReasons, ", "),
+		"processing_time":      visionResult.ProcessingTime.String(),
+		"elapsed_ms":           strconv.FormatInt(elapsedMs, 10),
+		// Whitelist fields (always present for consistency)
+		"evidence_count":       "0",
+		"new_message_nodes":    "0",
+		"message_content_match": "false",
+		"delivery_state":       "unknown",
+	}
+
+	// 从VerificationSignals中提取关键信号
+	signals := visionResult.VerificationSignals
+	// 尝试提取关键信号
+	if fullWindowChange, ok := signals["full_window_change_percent"].(float64); ok {
+		diagnostics["full_window_change_percent"] = fmt.Sprintf("%.1f", fullWindowChange)
+	}
+	if rightSideChange, ok := signals["right_side_change_percent"].(float64); ok {
+		diagnostics["right_side_change_percent"] = fmt.Sprintf("%.1f", rightSideChange)
+	}
+	if clickedRegionChange, ok := signals["clicked_region_change_percent"].(float64); ok {
+		diagnostics["clicked_region_change_percent"] = fmt.Sprintf("%.1f", clickedRegionChange)
+	}
+	if boundingBoxX, ok := signals["bounding_box_x"].(int); ok {
+		diagnostics["bounding_box_x"] = strconv.Itoa(boundingBoxX)
+	}
+	if boundingBoxWidth, ok := signals["bounding_box_width"].(int); ok {
+		diagnostics["bounding_box_width"] = strconv.Itoa(boundingBoxWidth)
+	}
+
+	var status adapter.Status
+	if visionResult.FocusSucceeded {
+		status = adapter.StatusSuccess
+	} else {
+		status = adapter.StatusFailed
+	}
+
+	var reasonCode adapter.ReasonCode
+	if visionResult.FocusSucceeded {
+		reasonCode = adapter.ReasonOK
+	} else {
+		reasonCode = adapter.ReasonCode("VISION_FOCUS_FAILED")
+	}
+
+	return adapter.Result{
+		Status:     status,
+		ReasonCode: reasonCode,
+		Confidence: visionResult.FocusConfidence,
+		ElapsedMs:  elapsedMs,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Focus completed via vision",
 				Context:   diagnostics,
 			},
 		},

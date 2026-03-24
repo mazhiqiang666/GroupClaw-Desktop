@@ -54,6 +54,9 @@ type BridgeInterface interface {
 
 	// Release 释放资源
 	Release()
+
+	// FocusConversationByVision 视觉Focus统一入口
+	FocusConversationByVision(windowHandle uintptr, strategy string, targetIndex int, waitAfterClickMs int) (VisionFocusResult, adapter.Result)
 }
 
 // AccessibleNode 可访问节点信息
