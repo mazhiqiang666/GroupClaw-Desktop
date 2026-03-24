@@ -112,8 +112,8 @@ func (e *UnifiedExecutor) PrintDiagnostics(step string, result adapter.Result) {
 	}
 }
 
-// JSONOutput represents standardized JSON output structure
-type JSONOutput struct {
+// StepTrace represents a single step in the execution trace
+type StepTrace struct {
 	Step         string                  `json:"step"`
 	Status       string                  `json:"status"`
 	Confidence   float64                 `json:"confidence"`
@@ -123,6 +123,13 @@ type JSONOutput struct {
 	Conversation *protocol.ConversationRef  `json:"conversation,omitempty"`
 	Message      *protocol.MessageObs    `json:"message,omitempty"`
 	Error        string                  `json:"error,omitempty"`
+}
+
+// JSONOutput represents standardized JSON output structure
+type JSONOutput struct {
+	Mode  string       `json:"mode"`  // "single" or "chain"
+	Steps []StepTrace  `json:"steps"`
+	Final *StepTrace   `json:"final,omitempty"`
 }
 
 // PrintJSON prints standardized JSON output
@@ -231,11 +238,16 @@ func findWeChatWindow(executor *UnifiedExecutor) {
 	}
 
 	if *jsonOutput {
-		output := JSONOutput{
+		step := StepTrace{
 			Step:       "find-window",
 			Status:     string(result.Status),
 			Confidence: result.Confidence,
 			Instances:  instances,
+		}
+		output := JSONOutput{
+			Mode:  "single",
+			Steps: []StepTrace{step},
+			Final: &step,
 		}
 		executor.PrintJSON(output)
 	} else {
@@ -258,12 +270,17 @@ func listNodes(executor *UnifiedExecutor, windowHandle uintptr) {
 	}
 
 	if *jsonOutput {
-		output := JSONOutput{
+		step := StepTrace{
 			Step:          "list-nodes",
 			Status:        string(scanResult.Status),
 			Confidence:    scanResult.Confidence,
 			Conversations: conversations,
 			Diagnostics:   scanResult.Diagnostics,
+		}
+		output := JSONOutput{
+			Mode:  "single",
+			Steps: []StepTrace{step},
+			Final: &step,
 		}
 		executor.PrintJSON(output)
 	} else {
@@ -289,12 +306,17 @@ func scanConversations(executor *UnifiedExecutor) {
 	}
 
 	if *jsonOutput {
-		output := JSONOutput{
+		step := StepTrace{
 			Step:          "scan",
 			Status:        string(scanResult.Status),
 			Confidence:    scanResult.Confidence,
 			Conversations: conversations,
 			Diagnostics:   scanResult.Diagnostics,
+		}
+		output := JSONOutput{
+			Mode:  "single",
+			Steps: []StepTrace{step},
+			Final: &step,
 		}
 		executor.PrintJSON(output)
 	} else {
@@ -329,12 +351,17 @@ func focusContact(executor *UnifiedExecutor, contactName string) {
 	focusResult := executor.RunFocus(*targetConv)
 
 	if *jsonOutput {
-		output := JSONOutput{
+		step := StepTrace{
 			Step:         "focus",
 			Status:       string(focusResult.Status),
 			Confidence:   focusResult.Confidence,
 			Conversation: targetConv,
 			Diagnostics:  focusResult.Diagnostics,
+		}
+		output := JSONOutput{
+			Mode:  "single",
+			Steps: []StepTrace{step},
+			Final: &step,
 		}
 		executor.PrintJSON(output)
 	} else {
@@ -376,12 +403,17 @@ func sendMessage(executor *UnifiedExecutor, contactName string, message string) 
 	sendResult := executor.RunSend(*targetConv, message, "debug-script")
 
 	if *jsonOutput {
-		output := JSONOutput{
+		step := StepTrace{
 			Step:         "send",
 			Status:       string(sendResult.Status),
 			Confidence:   sendResult.Confidence,
 			Conversation: targetConv,
 			Diagnostics:  sendResult.Diagnostics,
+		}
+		output := JSONOutput{
+			Mode:  "single",
+			Steps: []StepTrace{step},
+			Final: &step,
 		}
 		executor.PrintJSON(output)
 	} else {
@@ -414,13 +446,18 @@ func verifyMessage(executor *UnifiedExecutor, contactName string, message string
 	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, message, 5*time.Second)
 
 	if *jsonOutput {
-		output := JSONOutput{
+		step := StepTrace{
 			Step:         "verify",
 			Status:       string(verifyAdapterResult.Status),
 			Confidence:   verifyAdapterResult.Confidence,
 			Conversation: targetConv,
 			Message:      verifyResult,
 			Diagnostics:  verifyAdapterResult.Diagnostics,
+		}
+		output := JSONOutput{
+			Mode:  "single",
+			Steps: []StepTrace{step},
+			Final: &step,
 		}
 		executor.PrintJSON(output)
 	} else {
@@ -435,6 +472,9 @@ func fullTestFlow(executor *UnifiedExecutor) {
 	fmt.Println("=== WeChat Debugging Full Test Flow ===")
 	fmt.Println()
 
+	// Track all steps for JSON output
+	var steps []StepTrace
+
 	// Step 1: Find WeChat window
 	fmt.Println("Step 1: Finding WeChat window...")
 	instances, detectResult, err := executor.RunDetect()
@@ -443,6 +483,15 @@ func fullTestFlow(executor *UnifiedExecutor) {
 	}
 	fmt.Printf("  Found WeChat instance: %s\n", instances[0].InstanceID)
 	fmt.Println()
+
+	step1 := StepTrace{
+		Step:       "detect",
+		Status:     string(detectResult.Status),
+		Confidence: detectResult.Confidence,
+		Instances:  instances,
+		Diagnostics: detectResult.Diagnostics,
+	}
+	steps = append(steps, step1)
 
 	// Step 2: Scan conversations
 	fmt.Println("Step 2: Scanning conversation list...")
@@ -455,6 +504,15 @@ func fullTestFlow(executor *UnifiedExecutor) {
 		fmt.Printf("    [%d] %s\n", i+1, conv.DisplayName)
 	}
 	fmt.Println()
+
+	step2 := StepTrace{
+		Step:          "scan",
+		Status:        string(scanResult.Status),
+		Confidence:    scanResult.Confidence,
+		Conversations: conversations,
+		Diagnostics:   scanResult.Diagnostics,
+	}
+	steps = append(steps, step2)
 
 	// Step 3: Focus on first contact (or specified contact)
 	var targetConv *protocol.ConversationRef
@@ -475,6 +533,15 @@ func fullTestFlow(executor *UnifiedExecutor) {
 	executor.PrintDiagnostics("Focus", focusResult)
 	fmt.Println()
 
+	step3 := StepTrace{
+		Step:         "focus",
+		Status:       string(focusResult.Status),
+		Confidence:   focusResult.Confidence,
+		Conversation: targetConv,
+		Diagnostics:  focusResult.Diagnostics,
+	}
+	steps = append(steps, step3)
+
 	// Step 4: Send test message
 	fmt.Println("Step 4: Sending test message...")
 	time.Sleep(200 * time.Millisecond)
@@ -482,6 +549,15 @@ func fullTestFlow(executor *UnifiedExecutor) {
 	fmt.Printf("  Send confidence: %.2f\n", sendResult.Confidence)
 	executor.PrintDiagnostics("Send", sendResult)
 	fmt.Println()
+
+	step4 := StepTrace{
+		Step:         "send",
+		Status:       string(sendResult.Status),
+		Confidence:   sendResult.Confidence,
+		Conversation: targetConv,
+		Diagnostics:  sendResult.Diagnostics,
+	}
+	steps = append(steps, step4)
 
 	// Step 5: Verify message
 	fmt.Println("Step 5: Verifying message delivery...")
@@ -499,25 +575,20 @@ func fullTestFlow(executor *UnifiedExecutor) {
 
 	// Print standardized JSON output if requested
 	if *jsonOutput {
+		step5 := StepTrace{
+			Step:         "verify",
+			Status:       string(verifyAdapterResult.Status),
+			Confidence:   verifyAdapterResult.Confidence,
+			Conversation: targetConv,
+			Message:      verifyResult,
+			Diagnostics:  verifyAdapterResult.Diagnostics,
+		}
+		steps = append(steps, step5)
+
 		output := JSONOutput{
-			Step:       "full-test",
-			Status:     string(verifyAdapterResult.Status),
-			Confidence: verifyAdapterResult.Confidence,
-			Diagnostics: []adapter.Diagnostic{
-				{
-					Timestamp: time.Now(),
-					Level:     "info",
-					Message:   "Full test flow completed",
-					Context: map[string]string{
-						"detect_status":   string(detectResult.Status),
-						"scan_status":     string(scanResult.Status),
-						"focus_status":    string(focusResult.Status),
-						"send_status":     string(sendResult.Status),
-						"verify_status":   string(verifyAdapterResult.Status),
-						"conversations_found": strconv.Itoa(len(conversations)),
-					},
-				},
-			},
+			Mode:  "chain",
+			Steps: steps,
+			Final: &step5,
 		}
 		executor.PrintJSON(output)
 	}
@@ -527,6 +598,9 @@ func runChain(executor *UnifiedExecutor) {
 	fmt.Println("=== Running Complete Chain: Scan -> Focus -> Send -> Verify ===")
 	fmt.Println()
 
+	// Track all steps for JSON output
+	var steps []StepTrace
+
 	// Step 1: Detect WeChat instance
 	fmt.Println("Step 1: Detecting WeChat instance...")
 	instances, detectResult, err := executor.RunDetect()
@@ -535,6 +609,15 @@ func runChain(executor *UnifiedExecutor) {
 	}
 	fmt.Printf("  Found WeChat instance: %s\n", instances[0].InstanceID)
 	fmt.Println()
+
+	step1 := StepTrace{
+		Step:       "detect",
+		Status:     string(detectResult.Status),
+		Confidence: detectResult.Confidence,
+		Instances:  instances,
+		Diagnostics: detectResult.Diagnostics,
+	}
+	steps = append(steps, step1)
 
 	// Step 2: Scan conversations
 	fmt.Println("Step 2: Scanning conversation list...")
@@ -549,6 +632,15 @@ func runChain(executor *UnifiedExecutor) {
 	fmt.Printf("\n  Scan Diagnostics:\n")
 	executor.PrintDiagnostics("Scan", scanResult)
 	fmt.Println()
+
+	step2 := StepTrace{
+		Step:          "scan",
+		Status:        string(scanResult.Status),
+		Confidence:    scanResult.Confidence,
+		Conversations: conversations,
+		Diagnostics:   scanResult.Diagnostics,
+	}
+	steps = append(steps, step2)
 
 	// Step 3: Find and focus on target contact
 	var targetConv *protocol.ConversationRef
@@ -570,6 +662,15 @@ func runChain(executor *UnifiedExecutor) {
 	executor.PrintDiagnostics("Focus", focusResult)
 	fmt.Println()
 
+	step3 := StepTrace{
+		Step:         "focus",
+		Status:       string(focusResult.Status),
+		Confidence:   focusResult.Confidence,
+		Conversation: targetConv,
+		Diagnostics:  focusResult.Diagnostics,
+	}
+	steps = append(steps, step3)
+
 	// Step 4: Send message
 	fmt.Println("Step 4: Sending message...")
 	time.Sleep(200 * time.Millisecond)
@@ -578,6 +679,15 @@ func runChain(executor *UnifiedExecutor) {
 	fmt.Printf("  Send Diagnostics:\n")
 	executor.PrintDiagnostics("Send", sendResult)
 	fmt.Println()
+
+	step4 := StepTrace{
+		Step:         "send",
+		Status:       string(sendResult.Status),
+		Confidence:   sendResult.Confidence,
+		Conversation: targetConv,
+		Diagnostics:  sendResult.Diagnostics,
+	}
+	steps = append(steps, step4)
 
 	// Step 5: Verify message delivery
 	fmt.Println("Step 5: Verifying message delivery...")
@@ -596,25 +706,20 @@ func runChain(executor *UnifiedExecutor) {
 
 	// Print standardized JSON output if requested
 	if *jsonOutput {
+		step5 := StepTrace{
+			Step:         "verify",
+			Status:       string(verifyAdapterResult.Status),
+			Confidence:   verifyAdapterResult.Confidence,
+			Conversation: targetConv,
+			Message:      verifyResult,
+			Diagnostics:  verifyAdapterResult.Diagnostics,
+		}
+		steps = append(steps, step5)
+
 		output := JSONOutput{
-			Step:       "run-chain",
-			Status:     string(verifyAdapterResult.Status),
-			Confidence: verifyAdapterResult.Confidence,
-			Diagnostics: []adapter.Diagnostic{
-				{
-					Timestamp: time.Now(),
-					Level:     "info",
-					Message:   "Chain completed",
-					Context: map[string]string{
-						"detect_status":   string(detectResult.Status),
-						"scan_status":     string(scanResult.Status),
-						"focus_status":    string(focusResult.Status),
-						"send_status":     string(sendResult.Status),
-						"verify_status":   string(verifyAdapterResult.Status),
-						"conversations_found": strconv.Itoa(len(conversations)),
-					},
-				},
-			},
+			Mode:  "chain",
+			Steps: steps,
+			Final: &step5,
 		}
 		executor.PrintJSON(output)
 	}

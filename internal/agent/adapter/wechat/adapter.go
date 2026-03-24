@@ -200,6 +200,21 @@ func (a *WeChatAdapter) Detect() ([]protocol.AppInstanceRef, adapter.Result) {
 			ReasonCode: adapter.ReasonCode("NO_WECHAT_WINDOW"),
 			Confidence: 0.0,
 			ElapsedMs:  0,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "No WeChat window found",
+					Context: map[string]string{
+						"locate_source":        "unknown",
+						"evidence_count":       "0",
+						"new_message_nodes":    "0",
+						"message_content_match": "false",
+						"delivery_state":       "unknown",
+						"confidence":           "0.00",
+					},
+				},
+			},
 		}
 	}
 
@@ -208,6 +223,21 @@ func (a *WeChatAdapter) Detect() ([]protocol.AppInstanceRef, adapter.Result) {
 		ReasonCode: adapter.ReasonOK,
 		Confidence: 1.0,
 		ElapsedMs:  0,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "WeChat window detected",
+				Context: map[string]string{
+					"locate_source":        "unknown",
+					"evidence_count":       "0",
+					"new_message_nodes":    "0",
+					"message_content_match": "false",
+					"delivery_state":       "unknown",
+					"confidence":           "1.00",
+				},
+			},
+		},
 	}
 }
 
@@ -249,12 +279,19 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 
 	// 构建诊断信息
 	diagnostics := map[string]string{
-		"window_handle":    strconv.FormatUint(uint64(windowHandle), 10),
-		"window_class":     "",
-		"window_title":     "",
-		"nodes_found":      strconv.Itoa(len(nodes)),
-		"candidates_found": "0",
-		"hits_found":       "0",
+		"window_handle":        strconv.FormatUint(uint64(windowHandle), 10),
+		"window_class":         "",
+		"window_title":         "",
+		"nodes_found":          strconv.Itoa(len(nodes)),
+		"candidates_found":     "0",
+		"hits_found":           "0",
+		// Whitelist fields (always present for consistency)
+		"locate_source":        "unknown",
+		"evidence_count":       "0",
+		"new_message_nodes":    "0",
+		"message_content_match": "false",
+		"delivery_state":       "unknown",
+		"confidence":           "0.00",
 	}
 
 	if infoResult.Status == adapter.StatusSuccess {
@@ -415,6 +452,10 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 	assessment := a.deliveryRules.AssessFocusOnlyState(evidence)
 
 	diagnostics := ConvertFocusEvidenceToDiagnostics(evidence)
+	// Add non-applicable whitelist fields with default values
+	diagnostics["new_message_nodes"] = "0"
+	diagnostics["message_content_match"] = "false"
+	diagnostics["delivery_state"] = "unknown"
 	diagnostics["click_x"] = strconv.Itoa(clickX)
 	diagnostics["click_y"] = strconv.Itoa(clickY)
 	diagnostics["elapsed_ms"] = strconv.FormatInt(elapsedMs, 10)
@@ -510,11 +551,17 @@ func (a *WeChatAdapter) focusByListPosition(conv protocol.ConversationRef, start
 				Level:     "info",
 				Message:   "Focus completed using fallback",
 				Context: map[string]string{
-					"locate_source": "list_position",
-					"reason":        reason,
-					"click_x":       strconv.Itoa(clickX),
-					"click_y":       strconv.Itoa(clickY),
-					"elapsed_ms":    strconv.FormatInt(elapsedMs, 10),
+					"locate_source":        "list_position",
+					"reason":               reason,
+					"click_x":              strconv.Itoa(clickX),
+					"click_y":              strconv.Itoa(clickY),
+					"elapsed_ms":           strconv.FormatInt(elapsedMs, 10),
+					// Whitelist fields (always present for consistency)
+					"evidence_count":       "0",
+					"new_message_nodes":    "0",
+					"message_content_match": "false",
+					"delivery_state":       "unknown",
+					"confidence":           "0.90",
 				},
 			},
 		},
@@ -635,6 +682,9 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	)
 
 	diagnostics := ConvertMessageEvidenceToDiagnostics(messageEvidence)
+	// Add non-applicable whitelist fields with default values
+	diagnostics["locate_source"] = "unknown"
+	diagnostics["evidence_count"] = "0"
 	diagnostics["content_length"] = strconv.Itoa(len(content))
 	// Add delivery state to diagnostics
 	for k, v := range ConvertDeliveryAssessmentToDiagnostics(assessment) {
@@ -712,6 +762,13 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 	elapsedMs := time.Since(startTime).Milliseconds()
 
 	// Stub implementation: return nil message as expected by tests
+	diagnostics := ConvertDeliveryAssessmentToDiagnostics(assessment)
+	// Add non-applicable whitelist fields with default values
+	diagnostics["locate_source"] = "unknown"
+	diagnostics["evidence_count"] = "0"
+	diagnostics["new_message_nodes"] = "0"
+	diagnostics["message_content_match"] = "false"
+
 	return nil, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -722,7 +779,7 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 				Timestamp: time.Now(),
 				Level:     "info",
 				Message:   "Verification completed with strong validation",
-				Context:   ConvertDeliveryAssessmentToDiagnostics(assessment),
+				Context:   diagnostics,
 			},
 		},
 	}
