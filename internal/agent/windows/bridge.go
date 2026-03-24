@@ -236,74 +236,172 @@ func (b *Bridge) GetAccessible(windowHandle uintptr) (*IAccessible, adapter.Resu
 		}
 	}
 
-	var pAcc *IAccessible
-	ret, _, _ := procAccessibleObjectFromWindow.Call(
-		windowHandle,
-		0xFFFFFFFC, // OBJID_CLIENT
-		uintptr(unsafe.Pointer(&IID_IAccessible)),
-		uintptr(unsafe.Pointer(&pAcc)),
-	)
+	// 定义要尝试的 OBJID 列表
+	objidCandidates := []struct {
+		value uintptr
+		name  string
+	}{
+		{0x00000000, "OBJID_WINDOW"},
+		{0xFFFFFFFF, "OBJID_SYSMENU"},
+		{0xFFFFFFFE, "OBJID_TITLE"},
+		{0xFFFFFFFD, "OBJID_MENU"},
+		{0xFFFFFFFC, "OBJID_CLIENT"},
+		{0xFFFFFFFB, "OBJID_VSCROLL"},
+		{0xFFFFFFFA, "OBJID_HSCROLL"},
+	}
 
-	if ret != 0 || pAcc == nil {
-		// 添加详细的诊断信息
+	type attemptResult struct {
+		objidValue uintptr
+		objidName  string
+		ret        uintptr
+		pAcc       *IAccessible
+		childCount uintptr
+		success    bool
+	}
+
+	var attempts []attemptResult
+	var bestAcc *IAccessible
+	var bestObjidValue uintptr
+	var bestObjidName string
+	var bestChildCount uintptr = 0
+	var bestRet uintptr
+	var allEmpty bool = true
+	var anySuccess bool = false
+
+	// 尝试所有 OBJID
+	for _, objid := range objidCandidates {
+		var pAcc *IAccessible
+		ret, _, _ := procAccessibleObjectFromWindow.Call(
+			windowHandle,
+			objid.value,
+			uintptr(unsafe.Pointer(&IID_IAccessible)),
+			uintptr(unsafe.Pointer(&pAcc)),
+		)
+
+		success := (ret == 0 && pAcc != nil)
+		var childCount uintptr = 0
+		if success {
+			// 获取 child count
+			if pAcc != nil && pAcc.lpVtbl != nil {
+				vtbl := (*IAccessibleVtbl)(unsafe.Pointer(pAcc.lpVtbl))
+				if vtbl.get_accChildCount != 0 {
+					count, _, _ := syscall.Syscall(
+						vtbl.get_accChildCount,
+						1,
+						uintptr(unsafe.Pointer(pAcc)),
+						0,
+						0,
+					)
+					childCount = count
+				}
+			}
+			anySuccess = true
+			if childCount > 0 {
+				allEmpty = false
+			}
+		}
+
+		attempts = append(attempts, attemptResult{
+			objidValue: objid.value,
+			objidName:  objid.name,
+			ret:        ret,
+			pAcc:       pAcc,
+			childCount: childCount,
+			success:    success,
+		})
+
+		// 选择最佳候选：优先 childCount > 0，然后选择 childCount 最大的
+		if success {
+			if childCount > 0 {
+				if childCount > bestChildCount {
+					bestAcc = pAcc
+					bestObjidValue = objid.value
+					bestObjidName = objid.name
+					bestChildCount = childCount
+					bestRet = ret
+				}
+			} else if bestChildCount == 0 && bestAcc == nil {
+				// 如果还没有任何 childCount > 0 的候选，选择第一个成功的空树
+				bestAcc = pAcc
+				bestObjidValue = objid.value
+				bestObjidName = objid.name
+				bestChildCount = childCount
+				bestRet = ret
+			}
+		}
+	}
+
+	// 构建诊断信息
+	objidTriedList := ""
+	objidResultsSummary := ""
+	for i, attempt := range attempts {
+		if i > 0 {
+			objidTriedList += ","
+			objidResultsSummary += "; "
+		}
+		objidTriedList += fmt.Sprintf("0x%X", attempt.objidValue)
+		objidResultsSummary += fmt.Sprintf("%s:ret=0x%X,child=%d,ok=%v",
+			attempt.objidName, attempt.ret, attempt.childCount, attempt.success)
+	}
+
+	// 如果没有成功，返回错误
+	if !anySuccess {
 		return nil, adapter.Result{
 			Status:     adapter.StatusFailed,
 			ReasonCode: adapter.ReasonCode("ACCESSIBLE_NOT_FOUND"),
-			Error:      "AccessibleObjectFromWindow failed",
+			Error:      "AccessibleObjectFromWindow failed for all OBJIDs",
 			Diagnostics: []adapter.Diagnostic{
 				{
 					Timestamp: time.Now(),
 					Level:     "error",
-					Message:   "AccessibleObjectFromWindow failed",
+					Message:   "AccessibleObjectFromWindow failed for all OBJIDs",
 					Context: map[string]string{
-						"window_handle":     strconv.FormatUint(uint64(windowHandle), 10),
-						"return_code":       strconv.FormatUint(uint64(ret), 16),
-						"return_code_hex":   fmt.Sprintf("0x%X", ret),
-						"pAcc_is_nil":       strconv.FormatBool(pAcc == nil),
-						"objid_client":      "0xFFFFFFFC",
-						"iid_accessible":    fmt.Sprintf("%v", IID_IAccessible),
-						"accessible_object": "false",
-						"fallback_reason":   "accessible_object_from_window_failed",
+						"window_handle":        strconv.FormatUint(uint64(windowHandle), 10),
+						"objid_tried_list":    objidTriedList,
+						"objid_results_summary": objidResultsSummary,
+						"objid_attempt_count": strconv.Itoa(len(attempts)),
+						"selected_objid":      "none",
+						"selected_objid_name": "none",
+						"selected_objid_child_count": "0",
+						"all_objid_empty":     "true",
 					},
 				},
 			},
 		}
 	}
 
-	// 获取child_count用于诊断
-	var childCount uintptr = 0
-	if pAcc != nil && pAcc.lpVtbl != nil {
-		vtbl := (*IAccessibleVtbl)(unsafe.Pointer(pAcc.lpVtbl))
-		if vtbl.get_accChildCount != 0 {
-			// 调用 get_accChildCount
-			count, _, _ := syscall.Syscall(
-				vtbl.get_accChildCount,
-				1,
-				uintptr(unsafe.Pointer(pAcc)),
-				0,
-				0,
-			)
-			childCount = count
-		}
+	// 有成功，返回最佳候选
+	selectedObjid := fmt.Sprintf("0x%X", bestObjidValue)
+	selectedObjidName := bestObjidName
+	selectedChildCount := strconv.FormatUint(uint64(bestChildCount), 10)
+	allObjidEmpty := "false"
+	if allEmpty {
+		allObjidEmpty = "true"
 	}
 
-	return pAcc, adapter.Result{
+	return bestAcc, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
 		Diagnostics: []adapter.Diagnostic{
 			{
 				Timestamp: time.Now(),
 				Level:     "info",
-				Message:   "AccessibleObjectFromWindow succeeded",
+				Message:   "AccessibleObjectFromWindow succeeded with best OBJID",
 				Context: map[string]string{
-					"window_handle":      strconv.FormatUint(uint64(windowHandle), 10),
-					"return_code":        "0x0",
-					"return_code_hex":    "0x0",
-					"accessible_obtained": "true",
-					"pAcc_is_nil":        strconv.FormatBool(pAcc == nil),
-					"child_count":        strconv.FormatUint(uint64(childCount), 10),
-					"objid_client":       "0xFFFFFFFC",
-					"iid_accessible":     fmt.Sprintf("%v", IID_IAccessible),
+					"window_handle":        strconv.FormatUint(uint64(windowHandle), 10),
+					"return_code":          fmt.Sprintf("0x%X", bestRet),
+					"return_code_hex":      fmt.Sprintf("0x%X", bestRet),
+					"accessible_obtained":  "true",
+					"pAcc_is_nil":          strconv.FormatBool(bestAcc == nil),
+					"child_count":          selectedChildCount,
+					"objid_tried_list":    objidTriedList,
+					"objid_results_summary": objidResultsSummary,
+					"objid_attempt_count": strconv.Itoa(len(attempts)),
+					"selected_objid":      selectedObjid,
+					"selected_objid_name": selectedObjidName,
+					"selected_objid_child_count": selectedChildCount,
+					"all_objid_empty":     allObjidEmpty,
+					"iid_accessible":      fmt.Sprintf("%v", IID_IAccessible),
 				},
 			},
 		},
