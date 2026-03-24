@@ -1049,34 +1049,21 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	}
 
 	var messageEvidence SendVerificationEvidence
-	// 使用增强验证函数（如果所有必需参数都可用）
-	if inputBoxRect.Width > 0 && inputBoxRect.Height > 0 &&
-		len(beforeClickScreenshot) > 0 && len(afterClickScreenshot) > 0 &&
-		len(afterPasteScreenshot) > 0 &&
-		len(afterEnter300msScreenshot) > 0 && len(afterEnter800msScreenshot) > 0 && len(afterEnter1500msScreenshot) > 0 {
-
-		messageEvidence = a.messageRules.VerifyMessageSendEnhanced(
-			nodesBefore, nodesAfter,
-			beforeScreenshot, afterScreenshot,
-			chatAreaBounds, content,
-			inputBoxClicked,
-			inputBoxRect,
-			windowWidth, windowHeight,
-			beforeClickScreenshot,
-			afterClickScreenshot,
-			afterPasteScreenshot,
-			afterEnter300msScreenshot,
-			afterEnter800msScreenshot,
-			afterEnter1500msScreenshot,
-		)
-	} else {
-		// 回退到原始验证函数
-		messageEvidence = a.messageRules.VerifyMessageSend(
-			nodesBefore, nodesAfter,
-			beforeScreenshot, afterScreenshot,
-			chatAreaBounds, content,
-		)
-	}
+	// 始终使用增强验证函数（即使某些参数为空，函数内部会处理）
+	messageEvidence = a.messageRules.VerifyMessageSendEnhanced(
+		nodesBefore, nodesAfter,
+		beforeScreenshot, afterScreenshot,
+		chatAreaBounds, content,
+		inputBoxClicked,
+		inputBoxRect,
+		windowWidth, windowHeight,
+		beforeClickScreenshot,
+		afterClickScreenshot,
+		afterPasteScreenshot,
+		afterEnter300msScreenshot,
+		afterEnter800msScreenshot,
+		afterEnter1500msScreenshot,
+	)
 
 	// 阶段8: 生成最终评估
 	assessment := a.deliveryRules.AssessDeliveryState(
