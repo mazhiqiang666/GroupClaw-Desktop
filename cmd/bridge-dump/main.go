@@ -190,6 +190,36 @@ func main() {
 			log.Fatalf("Invalid window handle: %v", err)
 		}
 		debugVision(bridge, uintptr(handle))
+	case "focus-vision":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump focus-vision <window-handle> [index] [click-strategy] [wait-ms]")
+			log.Fatal("  index: -1 for default selection (first high-confidence item)")
+			log.Fatal("  click-strategy: rect_center, left_quarter_center, avatar_center, text_center, or empty for default")
+			log.Fatal("  wait-ms: milliseconds to wait after click (default: 800)")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		index := -1 // 默认使用自动选择
+		if len(args) >= 3 && args[2] != "" {
+			indexVal, err := strconv.Atoi(args[2])
+			if err == nil {
+				index = indexVal
+			}
+		}
+		strategy := ""
+		if len(args) >= 4 && args[3] != "" {
+			strategy = args[3]
+		}
+		waitMs := 800 // 默认800ms
+		if len(args) >= 5 && args[4] != "" {
+			waitVal, err := strconv.Atoi(args[4])
+			if err == nil && waitVal > 0 {
+				waitMs = waitVal
+			}
+		}
+		focusVision(bridge, uintptr(handle), index, strategy, waitMs)
 	default:
 		printUsage()
 	}
@@ -1765,6 +1795,157 @@ func clickConversation(bridge windows.BridgeInterface, handle uintptr, index int
 	}
 
 	fmt.Printf("\n=== Enhanced Click Conversation Complete ===\n")
+}
+
+// focusVision 视觉Focus统一入口
+func focusVision(bridge windows.BridgeInterface, handle uintptr, index int, strategy string, waitMs int) {
+	fmt.Printf("=== Vision Focus: Handle 0x%X (%d), Index %d, Strategy '%s', Wait %dms ===\n\n", handle, handle, index, strategy, waitMs)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	fmt.Printf("Window Information:\n")
+	fmt.Printf("  Handle: 0x%X (%d)\n", handle, handle)
+	fmt.Printf("  Class: %s\n", info.Class)
+	fmt.Printf("  Title: %s\n", info.Title)
+	fmt.Println()
+
+	// 类型断言以访问视觉检测方法
+	winBridge, ok := bridge.(*windows.Bridge)
+	if !ok {
+		fmt.Printf("ERROR: Failed to cast bridge to *windows.Bridge\n")
+		fmt.Printf("Bridge type: %T\n", bridge)
+		return
+	}
+
+	// 调用视觉Focus统一入口
+	fmt.Printf("--- Executing Vision Focus ---\n")
+	focusResult, result := winBridge.FocusConversationByVision(handle, strategy, index, waitMs)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Vision focus failed: %s\n", result.Error)
+		if focusResult.Error != "" {
+			fmt.Printf("  Additional error: %s\n", focusResult.Error)
+		}
+		return
+	}
+
+	// ============================================
+	// 显示Focus结果摘要
+	// ============================================
+	fmt.Printf("\n=== Vision Focus Results ===\n")
+
+	// 目标项信息
+	fmt.Printf("Target Selection:\n")
+	fmt.Printf("  Index: %d (selection source: %v)\n",
+		focusResult.TargetIndex,
+		focusResult.VerificationSignals["selection_source"])
+	fmt.Printf("  Position: x=%d, y=%d, w=%d, h=%d\n",
+		focusResult.TargetRect.X, focusResult.TargetRect.Y,
+		focusResult.TargetRect.Width, focusResult.TargetRect.Height)
+	fmt.Printf("  Features: avatar=%v, text=%v, unread_dot=%v, selected=%v\n",
+		focusResult.TargetRect.HasAvatar, focusResult.TargetRect.HasText,
+		focusResult.TargetRect.HasUnreadDot, focusResult.TargetRect.IsSelected)
+
+	// 点击信息
+	fmt.Printf("\nClick Execution:\n")
+	fmt.Printf("  Strategy: %s\n", focusResult.ClickStrategy)
+	fmt.Printf("  Source: %s\n", focusResult.ClickSource)
+	fmt.Printf("  Coordinates: x=%d, y=%d\n", focusResult.ClickX, focusResult.ClickY)
+
+	// Focus验证结果
+	fmt.Printf("\nFocus Verification:\n")
+	fmt.Printf("  Success: %v\n", focusResult.FocusSucceeded)
+	fmt.Printf("  Confidence: %.2f\n", focusResult.FocusConfidence)
+	if len(focusResult.SuccessReasons) > 0 {
+		fmt.Printf("  Reasons: %s\n", strings.Join(focusResult.SuccessReasons, ", "))
+	} else {
+		fmt.Printf("  Reasons: (none)\n")
+	}
+
+	// 详细验证信号
+	fmt.Printf("\nDetailed Verification Signals:\n")
+	for key, value := range focusResult.VerificationSignals {
+		// 跳过click_diagnostic（它是Diagnostic对象，打印会有问题）
+		if key == "click_diagnostic" {
+			continue
+		}
+		fmt.Printf("  %s: %v\n", key, value)
+	}
+
+	// 显示诊断信息
+	fmt.Printf("\nDiagnostics:\n")
+	for _, diag := range result.Diagnostics {
+		fmt.Printf("  [%s] %s\n", diag.Level, diag.Message)
+		for k, v := range diag.Context {
+			fmt.Printf("    %s: %s\n", k, v)
+		}
+	}
+
+	// 调试图像路径
+	if focusResult.DebugImagePath != "" {
+		fmt.Printf("\nDebug Resources:\n")
+		fmt.Printf("  Debug image: %s\n", focusResult.DebugImagePath)
+	}
+
+	// 总体评估
+	fmt.Printf("\n=== Overall Assessment ===\n")
+	if focusResult.FocusSucceeded {
+		fmt.Printf("✓ FOCUS SUCCESS: Conversation focus achieved with confidence %.2f\n", focusResult.FocusConfidence)
+		if focusResult.FocusConfidence >= 0.8 {
+			fmt.Printf("  High confidence: Visual verification strongly indicates successful focus\n")
+		} else if focusResult.FocusConfidence >= 0.5 {
+			fmt.Printf("  Medium confidence: Multiple verification signals detected\n")
+		} else {
+			fmt.Printf("  Low confidence: Some verification signals detected, but confidence is low\n")
+		}
+	} else {
+		fmt.Printf("✗ FOCUS FAILED: Unable to confirm successful focus\n")
+		fmt.Printf("  Confidence: %.2f\n", focusResult.FocusConfidence)
+		fmt.Printf("  Possible reasons:\n")
+		fmt.Printf("  - Click missed target conversation\n")
+		fmt.Printf("  - Interface changes too subtle for pixel diff\n")
+		fmt.Printf("  - Item already selected\n")
+		fmt.Printf("  - Verification thresholds too strict\n")
+	}
+
+	// 建议
+	fmt.Printf("\n=== Recommendations ===\n")
+	if focusResult.FocusSucceeded {
+		fmt.Printf("  Visual Focus prototype is WORKING\n")
+		fmt.Printf("  Next step: Integrate visual focus into adapter/wechat Focus() method\n")
+	} else {
+		fmt.Printf("  Check detection quality first: bridge-dump debug-vision %d\n", handle)
+		fmt.Printf("  Try different click strategy: %s\n",
+			getRecommendedStrategy(focusResult.ClickStrategy, focusResult.FocusConfidence))
+		fmt.Printf("  Consider adjusting verification thresholds if needed\n")
+	}
+
+	fmt.Printf("\n=== Vision Focus Complete ===\n")
+	fmt.Printf("Processing time: %v\n", focusResult.ProcessingTime)
+}
+
+// getRecommendedStrategy 根据当前策略和置信度推荐下一个策略
+func getRecommendedStrategy(currentStrategy string, confidence float64) string {
+	strategies := []string{"rect_center", "left_quarter_center", "text_center", "avatar_center"}
+
+	// 如果置信度低，推荐其他策略
+	if confidence < 0.5 {
+		for _, s := range strategies {
+			if s != currentStrategy {
+				return s
+			}
+		}
+	}
+
+	// 否则推荐当前策略或默认
+	if currentStrategy == "" {
+		return "rect_center"
+	}
+	return currentStrategy
 }
 
 // max 辅助函数

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
@@ -1144,4 +1145,393 @@ func (b *Bridge) CaptureWindowScreenshot(windowHandle uintptr) (*image.RGBA, err
 
 	// 将BGR转换为RGBA
 	return bgrToRGBA(pixels, width, height, rowSize)
+}
+
+// VisionFocusResult 视觉Focus结果
+type VisionFocusResult struct {
+	WindowHandle   uintptr                        `json:"window_handle"`
+	TargetIndex    int                            `json:"target_index"`
+	TargetRect     ConversationRect               `json:"target_rect"`
+	ClickStrategy  string                         `json:"click_strategy"`
+	ClickX         int                            `json:"click_x"`
+	ClickY         int                            `json:"click_y"`
+	ClickSource    string                         `json:"click_source"`
+	FocusSucceeded bool                           `json:"focus_succeeded"`
+	FocusConfidence float64                       `json:"focus_confidence"` // 0.0 ~ 1.0
+	SuccessReasons []string                       `json:"success_reasons"`
+	VerificationSignals map[string]interface{}    `json:"verification_signals"` // 各类验证信号值
+	ProcessingTime time.Duration                  `json:"processing_time"`
+	Error          string                         `json:"error,omitempty"`
+	DebugImagePath string                         `json:"debug_image_path,omitempty"`
+}
+
+// selectTargetConversation 选择目标会话项
+// 如果targetIndex >= 0，直接选择该index；否则使用默认选择逻辑
+func selectTargetConversation(convRects []ConversationRect, targetIndex int) (int, string) {
+	if targetIndex >= 0 {
+		if targetIndex < len(convRects) {
+			return targetIndex, "explicit_index"
+		}
+		// 如果指定的index无效，回退到默认逻辑
+	}
+
+	// 默认选择逻辑：选择第一个"同时具备文本区域或头像区域"的高置信候选项
+	for i, conv := range convRects {
+		// 优先选择同时有文本和头像的项
+		if conv.HasText && conv.HasAvatar {
+			return i, "default_has_text_and_avatar"
+		}
+	}
+
+	// 其次选择有文本的项
+	for i, conv := range convRects {
+		if conv.HasText {
+			return i, "default_has_text"
+		}
+	}
+
+	// 最后选择有头像的项
+	for i, conv := range convRects {
+		if conv.HasAvatar {
+			return i, "default_has_avatar"
+		}
+	}
+
+	// 如果都没有，选择第一个项
+	if len(convRects) > 0 {
+		return 0, "default_first_item"
+	}
+
+	return -1, "no_conversations"
+}
+
+// evaluateFocusSuccess 评估Focus是否成功
+// 基于4类验证信号计算成功率和置信度
+func evaluateFocusSuccess(beforeImg, afterImg *image.RGBA, targetRect ConversationRect, leftSidebarRect [4]int, windowWidth int) (bool, float64, []string, map[string]interface{}) {
+	if beforeImg == nil || afterImg == nil {
+		// 无法进行像素级验证，返回保守结果
+		return false, 0.3, []string{"insufficient_pixel_data"}, map[string]interface{}{
+			"error": "insufficient_pixel_data",
+		}
+	}
+
+	reasons := []string{}
+	signals := make(map[string]interface{})
+
+	// 1. 计算整窗差异
+	fullDiff, err := ComputeImageDifference(beforeImg, afterImg, leftSidebarRect, windowWidth)
+	if err == nil {
+		signals["full_window_diff_percent"] = fullDiff.DifferencePercent
+		signals["full_window_diff_pixels"] = fullDiff.DifferentPixels
+
+		// 阈值：整体差异超过0.1%认为有变化
+		if fullDiff.DifferencePercent > 0.1 {
+			reasons = append(reasons, "full_window_change_detected")
+			signals["full_window_change"] = true
+		} else {
+			signals["full_window_change"] = false
+		}
+	}
+
+	// 2. 计算右侧区域差异（消息区）
+	if fullDiff.RightSidePercent > 0 {
+		signals["right_side_diff_percent"] = fullDiff.RightSidePercent
+		signals["right_side_diff_pixels"] = fullDiff.RightSideDiffPixels
+
+		// 右侧差异超过0.2%认为消息区有变化
+		if fullDiff.RightSidePercent > 0.2 {
+			reasons = append(reasons, "right_side_change_detected")
+			signals["right_side_change"] = true
+		} else {
+			signals["right_side_change"] = false
+		}
+	}
+
+	// 3. 计算左侧点击项区域差异
+	if targetRect.X >= 0 && targetRect.Y >= 0 && targetRect.Width > 0 && targetRect.Height > 0 {
+		// 扩大区域以捕获周围变化
+		regionX := targetRect.X - 5
+		regionY := targetRect.Y - 5
+		regionWidth := targetRect.Width + 10
+		regionHeight := targetRect.Height + 10
+
+		if regionX < 0 { regionX = 0 }
+		if regionY < 0 { regionY = 0 }
+
+		clickedDiffCount, clickedDiffPercent, err := ComputeRegionDifference(
+			beforeImg, afterImg,
+			regionX, regionY, regionWidth, regionHeight,
+		)
+
+		if err == nil {
+			signals["clicked_region_diff_percent"] = clickedDiffPercent
+			signals["clicked_region_diff_pixels"] = clickedDiffCount
+
+			// 点击区域差异超过0.5%认为有变化
+			if clickedDiffPercent > 0.5 {
+				reasons = append(reasons, "clicked_region_change_detected")
+				signals["clicked_region_change"] = true
+			} else {
+				signals["clicked_region_change"] = false
+			}
+		}
+	}
+
+	// 4. 检查差异边界框位置是否合理
+	if fullDiff.DiffBoundingBox[2] > 0 && fullDiff.DiffBoundingBox[3] > 0 {
+		signals["diff_bounding_box"] = fullDiff.DiffBoundingBox
+		signals["diff_centroid"] = [2]int{fullDiff.DiffCentroidX, fullDiff.DiffCentroidY}
+
+		// 检查边界框是否在合理范围内（不在边缘）
+		boxX, boxY, boxWidth, boxHeight := fullDiff.DiffBoundingBox[0], fullDiff.DiffBoundingBox[1], fullDiff.DiffBoundingBox[2], fullDiff.DiffBoundingBox[3]
+		centerX := boxX + boxWidth/2
+		centerY := boxY + boxHeight/2
+
+		// 获取图像高度
+		windowHeight := beforeImg.Bounds().Dy()
+
+		// 如果边界框中心不在图像边缘附近（10%范围内），认为合理
+		marginX := windowWidth / 10
+		marginY := windowHeight / 10
+		if centerX > marginX && centerX < windowWidth - marginX &&
+		   centerY > marginY && centerY < windowHeight - marginY {
+			reasons = append(reasons, "diff_bbox_centered")
+			signals["diff_bbox_centered"] = true
+		} else {
+			signals["diff_bbox_centered"] = false
+		}
+	}
+
+	// 计算置信度
+	confidence := 0.0
+	successCount := 0
+	totalSignals := 0
+
+	// 信号1：整窗变化
+	if val, ok := signals["full_window_change"]; ok && val.(bool) {
+		successCount++
+	}
+	if _, ok := signals["full_window_change"]; ok {
+		totalSignals++
+	}
+
+	// 信号2：右侧变化
+	if val, ok := signals["right_side_change"]; ok && val.(bool) {
+		successCount++
+	}
+	if _, ok := signals["right_side_change"]; ok {
+		totalSignals++
+	}
+
+	// 信号3：点击区域变化
+	if val, ok := signals["clicked_region_change"]; ok && val.(bool) {
+		successCount++
+	}
+	if _, ok := signals["clicked_region_change"]; ok {
+		totalSignals++
+	}
+
+	// 信号4：边界框居中
+	if val, ok := signals["diff_bbox_centered"]; ok && val.(bool) {
+		successCount++
+	}
+	if _, ok := signals["diff_bbox_centered"]; ok {
+		totalSignals++
+	}
+
+	// 计算置信度
+	if totalSignals > 0 {
+		confidence = float64(successCount) / float64(totalSignals)
+	}
+
+	// 成功判定：至少2个信号通过且置信度>=0.5
+	success := successCount >= 2 && confidence >= 0.5
+
+	return success, confidence, reasons, signals
+}
+
+// FocusConversationByVision 视觉Focus统一入口
+// windowHandle: 窗口句柄
+// strategy: 点击策略 ("avatar_center", "text_center", "rect_center", "left_quarter_center", 或空字符串使用默认优先级)
+// targetIndex: 目标会话索引，-1表示使用默认选择逻辑
+// waitAfterClickMs: 点击后等待时间（毫秒），默认800ms
+func (b *Bridge) FocusConversationByVision(windowHandle uintptr, strategy string, targetIndex int, waitAfterClickMs int) (VisionFocusResult, adapter.Result) {
+	startTime := time.Now()
+	result := VisionFocusResult{
+		WindowHandle:   windowHandle,
+		TargetIndex:    targetIndex,
+		ClickStrategy:  strategy,
+		FocusSucceeded: false,
+		FocusConfidence: 0.0,
+		SuccessReasons: []string{},
+		VerificationSignals: make(map[string]interface{}),
+	}
+
+	if waitAfterClickMs <= 0 {
+		waitAfterClickMs = 800 // 默认800ms
+	}
+
+	// ============================================
+	// 步骤1：点击前视觉检测
+	// ============================================
+	beforeVision, visionResult := b.DetectConversations(windowHandle)
+	if visionResult.Status != adapter.StatusSuccess {
+		result.Error = fmt.Sprintf("Failed to detect conversations: %s", visionResult.Error)
+		return result, visionResult
+	}
+
+	if len(beforeVision.ConversationRects) == 0 {
+		result.Error = "No conversations detected"
+		return result, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("NO_CONVERSATIONS_DETECTED"),
+			Error:      result.Error,
+		}
+	}
+
+	// ============================================
+	// 步骤2：选择目标会话项
+	// ============================================
+	selectedIndex, selectSource := selectTargetConversation(beforeVision.ConversationRects, targetIndex)
+	if selectedIndex < 0 {
+		result.Error = "Failed to select target conversation"
+		return result, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("TARGET_SELECTION_FAILED"),
+			Error:      result.Error,
+		}
+	}
+
+	result.TargetIndex = selectedIndex
+	result.TargetRect = beforeVision.ConversationRects[selectedIndex]
+	result.VerificationSignals["selection_source"] = selectSource
+
+	// ============================================
+	// 步骤3：点击前截图
+	// ============================================
+	beforeScreenshot, err := b.CaptureWindowScreenshot(windowHandle)
+	if err != nil {
+		result.Error = fmt.Sprintf("Failed to capture pre-click screenshot: %v", err)
+		// 非致命错误，继续执行
+		beforeScreenshot = nil
+	}
+
+	// ============================================
+	// 步骤4：计算点击点
+	// ============================================
+	x, y, clickSource, clickDiag := b.GetConversationClickPoint(beforeVision, selectedIndex, strategy)
+	if clickSource == "invalid_strategy" || clickSource == "strategy_unavailable" {
+		result.Error = fmt.Sprintf("Click strategy failed: %s", clickDiag.Message)
+		return result, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("CLICK_STRATEGY_FAILED"),
+			Error:      result.Error,
+		}
+	}
+
+	result.ClickX = x
+	result.ClickY = y
+	result.ClickSource = clickSource
+	result.VerificationSignals["click_diagnostic"] = clickDiag
+
+	// ============================================
+	// 步骤5：执行点击
+	// ============================================
+	clickResult := b.Click(windowHandle, x, y)
+	if clickResult.Status != adapter.StatusSuccess {
+		result.Error = fmt.Sprintf("Click failed: %s", clickResult.Error)
+		return result, clickResult
+	}
+
+	// ============================================
+	// 步骤6：等待UI更新
+	// ============================================
+	time.Sleep(time.Duration(waitAfterClickMs) * time.Millisecond)
+
+	// ============================================
+	// 步骤7：点击后截图
+	// ============================================
+	afterScreenshot, err := b.CaptureWindowScreenshot(windowHandle)
+	if err != nil {
+		result.Error = fmt.Sprintf("Failed to capture post-click screenshot: %v", err)
+		// 非致命错误，继续验证
+		afterScreenshot = nil
+	}
+
+	// ============================================
+	// 步骤8：多信号验证
+	// ============================================
+	if beforeScreenshot != nil && afterScreenshot != nil {
+		leftSidebarRect := beforeVision.LeftSidebarRect
+		if leftSidebarRect[2] == 0 || leftSidebarRect[3] == 0 {
+			// 默认左侧30%
+			width := beforeVision.WindowWidth
+			if width <= 0 && beforeScreenshot != nil {
+				width = beforeScreenshot.Bounds().Dx()
+			}
+			leftSidebarRect = [4]int{0, 0, width * 30 / 100, beforeVision.WindowHeight}
+		}
+
+		success, confidence, reasons, signals := evaluateFocusSuccess(
+			beforeScreenshot, afterScreenshot,
+			result.TargetRect, leftSidebarRect, beforeVision.WindowWidth,
+		)
+
+		result.FocusSucceeded = success
+		result.FocusConfidence = confidence
+		result.SuccessReasons = reasons
+
+		// 合并验证信号
+		for k, v := range signals {
+			result.VerificationSignals[k] = v
+		}
+	} else {
+		// 无法进行像素级验证，返回保守结果
+		result.FocusSucceeded = false
+		result.FocusConfidence = 0.3
+		result.SuccessReasons = []string{"insufficient_pixel_data_for_verification"}
+		result.VerificationSignals["verification_quality"] = "low"
+	}
+
+	// ============================================
+	// 步骤9：生成调试图像（可选）
+	// ============================================
+	if beforeScreenshot != nil && len(beforeVision.ConversationRects) > 0 {
+		debugPath, err := saveDebugImage(beforeScreenshot, beforeVision.LeftSidebarRect, beforeVision.ConversationRects)
+		if err == nil {
+			result.DebugImagePath = debugPath
+		}
+	}
+
+	result.ProcessingTime = time.Since(startTime)
+
+	// ============================================
+	// 步骤10：构建诊断结果
+	// ============================================
+	diagnostics := []adapter.Diagnostic{
+		{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   "Vision focus completed",
+			Context: map[string]string{
+				"window_handle":    strconv.FormatUint(uint64(windowHandle), 10),
+				"target_index":     strconv.Itoa(result.TargetIndex),
+				"click_strategy":   strategy,
+				"click_x":          strconv.Itoa(result.ClickX),
+				"click_y":          strconv.Itoa(result.ClickY),
+				"click_source":     result.ClickSource,
+				"focus_succeeded":  strconv.FormatBool(result.FocusSucceeded),
+				"focus_confidence": fmt.Sprintf("%.2f", result.FocusConfidence),
+				"success_reasons":  strings.Join(result.SuccessReasons, ", "),
+				"processing_time":  result.ProcessingTime.String(),
+				"wait_after_click_ms": strconv.Itoa(waitAfterClickMs),
+			},
+		},
+	}
+
+	return result, adapter.Result{
+		Status:      adapter.StatusSuccess,
+		ReasonCode:  adapter.ReasonOK,
+		Diagnostics: diagnostics,
+	}
 }
