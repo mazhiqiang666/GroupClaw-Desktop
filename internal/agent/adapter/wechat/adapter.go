@@ -833,11 +833,16 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 			switch k {
 			case "locate_source":
 				focusLocateSource = v
-			case "confidence":
+			case "focus_confidence": // 优先读取视觉Focus返回的focus_confidence
 				focusConfidence = v
+			case "confidence": // 向后兼容旧路径的confidence字段
+				if focusConfidence == "0.00" {
+					focusConfidence = v
+				}
 			case "click_strategy":
 				focusClickStrategy = v
 			case "click_source":
+				// 如果click_strategy为unknown，则使用click_source作为回退
 				if focusClickStrategy == "unknown" {
 					focusClickStrategy = v
 				}
