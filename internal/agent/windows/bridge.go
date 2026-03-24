@@ -447,13 +447,15 @@ func (b *Bridge) FocusWindow(handle uintptr) adapter.Result {
 	}
 }
 
-// tryChildWindows 尝试枚举子窗口并获取可访问对象
-func (b *Bridge) tryChildWindows(parentHandle uintptr) (uintptr, *IAccessible, adapter.Result) {
-	// 存储找到的有效子窗口句柄
+// tryChildWindowsRecursive 递归尝试子窗口并获取可访问对象
+func (b *Bridge) tryChildWindowsRecursive(parentHandle uintptr, currentDepth int, maxDepth int, visitedHandles *[]uintptr) (uintptr, *IAccessible, adapter.Result, int) {
+	// 存储找到的有效窗口句柄
 	var foundHandle uintptr
 	var foundAcc *IAccessible
 	var foundResult adapter.Result
 	var foundInfo WindowInfo
+	var foundDepth int = currentDepth
+	var foundChildCount uintptr = 0
 
 	// 枚举所有子窗口
 	childHandles := []uintptr{}
@@ -467,20 +469,27 @@ func (b *Bridge) tryChildWindows(parentHandle uintptr) (uintptr, *IAccessible, a
 			Status:     adapter.StatusFailed,
 			ReasonCode: adapter.ReasonCode("ENUM_CHILD_FAILED"),
 			Error:      "Failed to enumerate child windows",
-		}
+		}, currentDepth
 	}
 
-	// 诊断信息：记录子窗口数量
+	// 诊断信息：记录当前深度和子窗口数量
 	diagnostics := []adapter.Diagnostic{
 		{
 			Timestamp: time.Now(),
 			Level:     "info",
-			Message:   "Trying child windows",
+			Message:   "Trying child windows at depth",
 			Context: map[string]string{
 				"parent_handle": strconv.FormatUint(uint64(parentHandle), 10),
+				"current_depth": strconv.Itoa(currentDepth),
+				"max_depth":     strconv.Itoa(maxDepth),
 				"child_count":   strconv.Itoa(len(childHandles)),
 			},
 		},
+	}
+
+	// 记录已访问窗口
+	for _, h := range childHandles {
+		*visitedHandles = append(*visitedHandles, h)
 	}
 
 	// 尝试每个子窗口
@@ -493,47 +502,55 @@ func (b *Bridge) tryChildWindows(parentHandle uintptr) (uintptr, *IAccessible, a
 
 		// 尝试获取可访问对象
 		pAcc, accResult := b.GetAccessible(childHandle)
+		childCount := uintptr(0)
 		if accResult.Status == adapter.StatusSuccess {
 			// 检查是否有有效的子节点
-			childCount := b.getAccChildCount(pAcc)
+			childCount = b.getAccChildCount(pAcc)
 
-			// 即使 childCount == 0，也返回该窗口，因为它可能本身是有效的可访问对象
-			// 但优先选择有子节点的窗口
-			if childCount > 0 || foundAcc == nil {
-				// 如果已经有找到的窗口且有子节点，但当前窗口没有子节点，则不覆盖
-				if foundAcc != nil && b.getAccChildCount(foundAcc) > 0 && childCount == 0 {
-					// 保持已有的有子节点的窗口
-				} else {
-					foundHandle = childHandle
-					foundAcc = pAcc
-					foundResult = accResult
-					foundInfo = childInfo
+			// 选择最佳窗口：优先选择有子节点的，同等情况选择深度最浅的
+			isBetter := false
+			if foundAcc == nil {
+				isBetter = true
+			} else if childCount > 0 && foundChildCount == 0 {
+				isBetter = true
+			} else if childCount > 0 && foundChildCount > 0 && currentDepth < foundDepth {
+				isBetter = true
+			} else if childCount == 0 && foundChildCount == 0 && currentDepth < foundDepth {
+				isBetter = true
+			}
 
-					// 添加成功诊断
-					successReason := "accessible_with_children"
-					if childCount == 0 {
-						successReason = "accessible_no_children"
-					}
+			if isBetter {
+				foundHandle = childHandle
+				foundAcc = pAcc
+				foundResult = accResult
+				foundInfo = childInfo
+				foundDepth = currentDepth
+				foundChildCount = childCount
 
-					diagnostics = append(diagnostics, adapter.Diagnostic{
-						Timestamp: time.Now(),
-						Level:     "info",
-						Message:   "Found accessible child window",
-						Context: map[string]string{
-							"child_handle":   strconv.FormatUint(uint64(childHandle), 10),
-							"child_class":    childInfo.Class,
-							"child_title":    childInfo.Title,
-							"child_index":    strconv.Itoa(i),
-							"child_count":    strconv.FormatUint(uint64(childCount), 10),
-							"success_reason": successReason,
-							"window_selected": "true",
-							"has_children":    strconv.FormatBool(childCount > 0),
-						},
-					})
-
-					// 将accResult的诊断信息也添加进来
-					diagnostics = append(diagnostics, accResult.Diagnostics...)
+				// 添加成功诊断
+				successReason := "accessible_with_children"
+				if childCount == 0 {
+					successReason = "accessible_no_children"
 				}
+
+				diagnostics = append(diagnostics, adapter.Diagnostic{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Found accessible window",
+					Context: map[string]string{
+						"window_handle": strconv.FormatUint(uint64(childHandle), 10),
+						"window_class":  childInfo.Class,
+						"window_title":  childInfo.Title,
+						"window_index":  strconv.Itoa(i),
+						"child_count":   strconv.FormatUint(uint64(childCount), 10),
+						"depth":         strconv.Itoa(currentDepth),
+						"success_reason": successReason,
+						"has_children":   strconv.FormatBool(childCount > 0),
+					},
+				})
+
+				// 将accResult的诊断信息也添加进来
+				diagnostics = append(diagnostics, accResult.Diagnostics...)
 			}
 
 			// 记录 childCount == 0 的情况用于诊断
@@ -541,15 +558,16 @@ func (b *Bridge) tryChildWindows(parentHandle uintptr) (uintptr, *IAccessible, a
 				diagnostics = append(diagnostics, adapter.Diagnostic{
 					Timestamp: time.Now(),
 					Level:     "debug",
-					Message:   "Child window has no children",
+					Message:   "Window has no children",
 					Context: map[string]string{
-						"child_handle": strconv.FormatUint(uint64(childHandle), 10),
-						"child_class":  childInfo.Class,
-						"child_title":  childInfo.Title,
-						"child_index":  strconv.Itoa(i),
-						"child_count":  "0",
-						"accessible":   "true",
-						"note":         "Window is accessible but has no child nodes",
+						"window_handle": strconv.FormatUint(uint64(childHandle), 10),
+						"window_class":  childInfo.Class,
+						"window_title":  childInfo.Title,
+						"window_index":  strconv.Itoa(i),
+						"depth":         strconv.Itoa(currentDepth),
+						"child_count":   "0",
+						"accessible":    "true",
+						"note":          "Window is accessible but has no child nodes",
 					},
 				})
 			}
@@ -559,47 +577,134 @@ func (b *Bridge) tryChildWindows(parentHandle uintptr) (uintptr, *IAccessible, a
 		diagnostics = append(diagnostics, adapter.Diagnostic{
 			Timestamp: time.Now(),
 			Level:     "debug",
-			Message:   "Tried child window",
+			Message:   "Tried window",
 			Context: map[string]string{
-				"child_handle": strconv.FormatUint(uint64(childHandle), 10),
-				"child_class":  childInfo.Class,
-				"child_title":  childInfo.Title,
-				"child_index":  strconv.Itoa(i),
-				"accessible":   strconv.FormatBool(accResult.Status == adapter.StatusSuccess),
-				"error":        accResult.Error,
+				"window_handle": strconv.FormatUint(uint64(childHandle), 10),
+				"window_class":  childInfo.Class,
+				"window_title":  childInfo.Title,
+				"window_index":  strconv.Itoa(i),
+				"depth":         strconv.Itoa(currentDepth),
+				"accessible":    strconv.FormatBool(accResult.Status == adapter.StatusSuccess),
+				"error":         accResult.Error,
 			},
 		})
+
+		// 如果当前窗口没有子节点，且未达到最大深度，继续递归搜索
+		if accResult.Status == adapter.StatusSuccess && childCount == 0 && currentDepth < maxDepth {
+			grandchildHandle, grandchildAcc, grandchildResult, grandchildDepth := b.tryChildWindowsRecursive(childHandle, currentDepth+1, maxDepth, visitedHandles)
+			if grandchildResult.Status == adapter.StatusSuccess && grandchildAcc != nil {
+				grandchildCount := b.getAccChildCount(grandchildAcc)
+
+				// 检查孙窗口是否更好
+				isGrandchildBetter := false
+				if foundAcc == nil {
+					isGrandchildBetter = true
+				} else if grandchildCount > 0 && foundChildCount == 0 {
+					isGrandchildBetter = true
+				} else if grandchildCount > 0 && foundChildCount > 0 && grandchildDepth < foundDepth {
+					isGrandchildBetter = true
+				} else if grandchildCount == 0 && foundChildCount == 0 && grandchildDepth < foundDepth {
+					isGrandchildBetter = true
+				}
+
+				if isGrandchildBetter {
+					foundHandle = grandchildHandle
+					foundAcc = grandchildAcc
+					foundResult = grandchildResult
+					foundDepth = grandchildDepth
+					foundChildCount = grandchildCount
+					// 注意：这里不更新foundInfo，因为孙窗口的信息可能不同
+				}
+			}
+		}
 	}
 
 	// 检查是否找到了可访问对象
 	if foundAcc != nil {
+		// 获取窗口信息（如果之前没有获取）
+		if foundInfo.Class == "" && foundInfo.Title == "" {
+			foundInfo, _ = b.GetWindowInfo(foundHandle)
+		}
+
 		// 添加最终诊断
-		childCount := b.getAccChildCount(foundAcc)
+		finalChildCount := b.getAccChildCount(foundAcc)
 		diagnostics = append(diagnostics, adapter.Diagnostic{
 			Timestamp: time.Now(),
 			Level:     "info",
-			Message:   "Selected best child window for accessible tree",
+			Message:   "Selected best window for accessible tree",
 			Context: map[string]string{
-				"selected_handle":  strconv.FormatUint(uint64(foundHandle), 10),
-				"selected_class":   foundInfo.Class,
-				"selected_title":   foundInfo.Title,
-				"child_count":      strconv.FormatUint(uint64(childCount), 10),
-				"has_children":     strconv.FormatBool(childCount > 0),
-				"selection_method": "first_accessible_with_children_or_any",
+				"selected_handle":    strconv.FormatUint(uint64(foundHandle), 10),
+				"selected_class":     foundInfo.Class,
+				"selected_title":     foundInfo.Title,
+				"selected_depth":     strconv.Itoa(foundDepth),
+				"child_count":        strconv.FormatUint(uint64(finalChildCount), 10),
+				"has_children":       strconv.FormatBool(finalChildCount > 0),
+				"selection_method":   "recursive_depth_first",
+				"search_depth":       strconv.Itoa(maxDepth),
+				"visited_at_depth":   strconv.Itoa(currentDepth),
 			},
 		})
 
 		foundResult.Diagnostics = diagnostics
-		return foundHandle, foundAcc, foundResult
+		return foundHandle, foundAcc, foundResult, foundDepth
 	}
 
-	// 如果没有找到有效的子窗口
+	// 如果没有找到有效的窗口
 	return 0, nil, adapter.Result{
 		Status:     adapter.StatusFailed,
 		ReasonCode: adapter.ReasonCode("NO_VALID_CHILD"),
-		Error:      "No child window with accessible subtree found",
+		Error:      fmt.Sprintf("No accessible window found up to depth %d", maxDepth),
 		Diagnostics: diagnostics,
+	}, currentDepth
+}
+
+// tryChildWindows 尝试枚举子窗口并获取可访问对象
+func (b *Bridge) tryChildWindows(parentHandle uintptr) (uintptr, *IAccessible, adapter.Result) {
+	// 使用递归搜索，最大深度为3
+	maxDepth := 3
+	visitedHandles := []uintptr{}
+
+	// 调用递归搜索函数
+	foundHandle, foundAcc, foundResult, selectedDepth := b.tryChildWindowsRecursive(parentHandle, 0, maxDepth, &visitedHandles)
+
+	if foundResult.Status == adapter.StatusSuccess && foundAcc != nil {
+		// 获取窗口信息
+		foundInfo, _ := b.GetWindowInfo(foundHandle)
+		finalChildCount := b.getAccChildCount(foundAcc)
+
+		// 添加最终诊断信息，包含要求的字段
+		selectedHandlePath := strconv.FormatUint(uint64(parentHandle), 10)
+		if selectedDepth > 0 {
+			selectedHandlePath = fmt.Sprintf("%s->%d", selectedHandlePath, foundHandle)
+		}
+
+		// 更新foundResult的诊断信息
+		finalDiagnostics := foundResult.Diagnostics
+		finalDiagnostics = append(finalDiagnostics, adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   "tryChildWindows completed with recursive search",
+			Context: map[string]string{
+				"parent_handle":       strconv.FormatUint(uint64(parentHandle), 10),
+				"selected_handle":     strconv.FormatUint(uint64(foundHandle), 10),
+				"selected_class":      foundInfo.Class,
+				"selected_title":      foundInfo.Title,
+				"search_depth":        strconv.Itoa(maxDepth),
+				"selected_depth":      strconv.Itoa(selectedDepth),
+				"selected_handle_path": selectedHandlePath,
+				"visited_window_count": strconv.Itoa(len(visitedHandles)),
+				"selected_child_count": strconv.FormatUint(uint64(finalChildCount), 10),
+				"has_children":        strconv.FormatBool(finalChildCount > 0),
+				"selection_method":    "recursive_depth_first",
+			},
+		})
+
+		foundResult.Diagnostics = finalDiagnostics
+		return foundHandle, foundAcc, foundResult
 	}
+
+	// 如果没有找到有效的窗口，返回原始结果（递归函数已经包含了诊断信息）
+	return foundHandle, foundAcc, foundResult
 }
 
 // EnumerateAccessibleNodes 枚举可访问节点
@@ -779,7 +884,7 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 
 	// 创建根节点
 	rootNode := AccessibleNode{
-		Handle:    windowHandle,
+		Handle:    effectiveHandle,
 		Name:      info.Title,
 		Role:      "window",
 		ClassName: info.Class,
