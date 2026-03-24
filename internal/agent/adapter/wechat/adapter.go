@@ -2,6 +2,7 @@ package wechat
 
 import (
 	"fmt"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -300,13 +301,36 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 	visionResult, visionAdapterResult := a.bridge.DetectConversations(windowHandle)
 	var visualConversations []protocol.ConversationRef
 	if visionAdapterResult.Status == adapter.StatusSuccess && len(visionResult.ConversationRects) > 0 {
-		// 视觉扫描成功，转换为ConversationRef
+		// 视觉扫描成功，对候选项进行评分和排序
+		type scoredRect struct {
+			rect           windows.ConversationRect
+			originalIndex  int
+			score          int
+		}
+		scoredRects := make([]scoredRect, len(visionResult.ConversationRects))
 		for i, rect := range visionResult.ConversationRects {
-			displayName := fmt.Sprintf("conversation_%d", i)
+			scoredRects[i] = scoredRect{
+				rect:          rect,
+				originalIndex: i,
+				score:         scoreVisualCandidate(rect),
+			}
+		}
+		// 按分数降序排序（分数高的优先）
+		sort.Slice(scoredRects, func(i, j int) bool {
+			return scoredRects[i].score > scoredRects[j].score
+		})
+		// 转换为ConversationRef，按排序后的顺序展示
+		for rank, scored := range scoredRects {
+			rect := scored.rect
+			originalIndex := scored.originalIndex
+			displayName := fmt.Sprintf("conversation_%d", rank) // 使用排序后的排名作为显示名
 			previewText := fmt.Sprintf("rect:%d_%d_%d_%d", rect.X, rect.Y, rect.Width, rect.Height)
 			hints := []string{
-				fmt.Sprintf("visual_index:%d", i),
+				fmt.Sprintf("visual_index:%d", originalIndex), // 原始视觉索引
 				fmt.Sprintf("rect:%d_%d_%d_%d", rect.X, rect.Y, rect.Width, rect.Height),
+				fmt.Sprintf("visual_rank:%d", rank),           // 排序后的排名
+				fmt.Sprintf("original_visual_index:%d", originalIndex),
+				fmt.Sprintf("visual_score:%d", scored.score),
 			}
 			if rect.HasAvatar {
 				hints = append(hints, "has_avatar")
@@ -324,7 +348,7 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 				HostWindowHandle: windowHandle,
 				AppInstance:      instance,
 				DisplayName:      displayName,
-				ListPosition:     i, // 视觉索引直接作为ListPosition
+				ListPosition:     originalIndex, // 使用原始视觉索引作为ListPosition，供FocusConversationByVision使用
 				PreviewText:      previewText,
 				ListNeighborhoodHint: hints,
 			}
@@ -473,9 +497,18 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 	}
 
 	// 2. 优先尝试视觉Focus路线
+	// 根据候选特征自适应选择点击策略
+	strategy := "rect_center" // 默认策略
+	// 检查候选项是否有文本（has_text）
+	for _, hint := range conv.ListNeighborhoodHint {
+		if hint == "has_text" {
+			strategy = "text_center" // 如果候选项有文本，优先使用文本中心
+			break
+		}
+	}
 	visionResult, visionAdapterResult := a.bridge.FocusConversationByVision(
 		conv.HostWindowHandle,
-		"rect_center", // 默认策略：点击会话项矩形中心
+		strategy, // 自适应策略
 		conv.ListPosition, // 使用ListPosition作为目标索引
 		800, // 点击后等待800ms
 	)
@@ -590,7 +623,7 @@ func (a *WeChatAdapter) Focus(conv protocol.ConversationRef) adapter.Result {
 			"vision_focus_status":    string(visionAdapterResult.Status),
 			"vision_focus_succeeded": strconv.FormatBool(visionResult.FocusSucceeded),
 			"vision_focus_confidence": fmt.Sprintf("%.2f", visionResult.FocusConfidence),
-			"vision_click_strategy":   "rect_center",
+			"vision_click_strategy":   visionResult.ClickStrategy,
 			"vision_target_index":     strconv.Itoa(conv.ListPosition),
 		},
 	}
@@ -1096,6 +1129,37 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 			},
 		},
 	}
+}
+
+// scoreVisualCandidate 计算视觉候选项的评分
+func scoreVisualCandidate(rect windows.ConversationRect) int {
+	score := 0
+
+	// has_text 优先（最高权重）
+	if rect.HasText {
+		score += 30
+	}
+	// has_avatar 次优
+	if rect.HasAvatar {
+		score += 20
+	}
+	// has_text + has_avatar 最高（额外加分）
+	if rect.HasText && rect.HasAvatar {
+		score += 10
+	}
+	// rect 尺寸合理（宽度 100-300，高度 30-60）
+	if rect.Width >= 100 && rect.Width <= 300 && rect.Height >= 30 && rect.Height <= 60 {
+		score += 15
+	}
+	// is_selected 可加分
+	if rect.IsSelected {
+		score += 10
+	}
+	// has_unread_dot 可加分
+	if rect.HasUnreadDot {
+		score += 5
+	}
+	return score
 }
 
 // convertVisionFocusResult 将VisionFocusResult转换为adapter.Result
