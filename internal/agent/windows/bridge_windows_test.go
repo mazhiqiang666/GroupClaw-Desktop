@@ -5,7 +5,7 @@ package windows
 import (
 	"testing"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
 )
 
 func TestNewBridge(t *testing.T) {

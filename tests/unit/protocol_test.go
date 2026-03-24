@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 func TestProtocolSerialization(t *testing.T) {

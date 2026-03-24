@@ -80,7 +80,7 @@ bridge-dump focus <handle>
 ## 目录结构
 
 ```
-auto-customer-service/
+GroupClaw-Desktop/
 ├── README.md
 ├── go.mod                          # Go 模块定义
 ├── go.sum
@@ -168,7 +168,7 @@ auto-customer-service/
 ### 1. 初始化 Go 模块
 
 ```bash
-go mod init github.com/yourorg/auto-customer-service
+go mod init github.com/mazhiqiang666/GroupClaw-Desktop
 go mod tidy
 ```
 
@@ -231,16 +231,16 @@ task test-all
 
 ```bash
 # 运行完整链路测试（mock 模式）
-wechat-debug run-chain --contact "张三" --message "Test message" --mock
+wechat-debug --mock run-chain --contact "张三" --message "Test message"
 
 # 输出 JSON 格式
-wechat-debug run-chain --contact "张三" --message "Test message" --mock --json
+wechat-debug --mock --json run-chain --contact "张三" --message "Test message"
 
 # 单独测试各步骤（mock 模式）
-wechat-debug scan --mock
-wechat-debug focus --contact "张三" --mock
-wechat-debug send --contact "张三" --message "Hello" --mock
-wechat-debug verify --contact "张三" --message "Hello" --mock
+wechat-debug --mock scan
+wechat-debug --mock focus --contact "张三"
+wechat-debug --mock send --contact "张三" --message "Hello"
+wechat-debug --mock verify --contact "张三" --message "Hello"
 ```
 
 **Mock 模式特点：**
@@ -259,7 +259,7 @@ wechat-debug verify --contact "张三" --message "Hello" --mock
 wechat-debug run-chain --contact "张三" --message "Test message"
 
 # 输出 JSON 格式
-wechat-debug run-chain --contact "张三" --message "Test message" --json
+wechat-debug --json run-chain --contact "张三" --message "Test message"
 
 # 单独测试各步骤（real 模式）
 wechat-debug find-window
@@ -388,7 +388,7 @@ make test-adapter
 go test -v ./internal/agent/adapter/wechat -run "TestDiagnosticFlow" -timeout 30s
 
 # 4. Mock 模式联调测试
-wechat-debug run-chain --contact "张三" --message "Test message" --mock --json
+wechat-debug --mock --json run-chain --contact "张三" --message "Test message"
 
 # 或者运行所有 WeChat 适配器测试
 make test-all

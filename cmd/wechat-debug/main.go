@@ -5,18 +5,17 @@ import (
 	"flag"
 	"fmt"
 	"log"
+	"os"
 	"time"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter/wechat"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter/wechat"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 var (
-	jsonOutput    = flag.Bool("json", false, "Output as JSON")
-	contactName   = flag.String("contact", "", "Contact name to focus/send to")
-	messageContent = flag.String("message", "Test message from debugging script", "Message content to send")
-	mockMode      = flag.Bool("mock", false, "Use mock bridge for testing")
+	jsonOutput = flag.Bool("json", false, "Output as JSON")
+	mockMode   = flag.Bool("mock", false, "Use mock bridge for testing")
 )
 
 // UnifiedExecutor provides common operations for WeChat debugging
@@ -142,15 +141,18 @@ func (e *UnifiedExecutor) PrintJSON(output JSONOutput) {
 }
 
 func main() {
+	// Parse global flags
 	flag.Parse()
-	args := flag.Args()
 
+	// Get non-flag arguments
+	args := flag.Args()
 	if len(args) < 1 {
 		printUsage()
 		return
 	}
 
 	command := args[0]
+	subArgs := args[1:]
 
 	// Create executor with mock mode if specified
 	executor := NewUnifiedExecutor(*mockMode)
@@ -164,30 +166,78 @@ func main() {
 
 	switch command {
 	case "find-window":
-		findWeChatWindow(executor)
+		findWeChatWindow(executor, *jsonOutput)
 	case "list-conversations":
-		listConversations(executor)
+		listConversations(executor, *jsonOutput)
 	case "scan":
-		scanConversations(executor)
+		scanConversations(executor, *jsonOutput)
 	case "focus":
-		if *contactName == "" {
-			log.Fatal("Usage: wechat-debug focus --contact <name>")
+		focusCmd := flag.NewFlagSet("focus", flag.ExitOnError)
+		contactName := focusCmd.String("contact", "", "Contact name to focus on")
+		if err := focusCmd.Parse(subArgs); err != nil {
+			log.Fatalf("Failed to parse focus flags: %v", err)
 		}
-		focusContact(executor, *contactName)
+		if *contactName == "" {
+			focusCmd.Usage = func() {
+				fmt.Println("Usage: wechat-debug focus --contact <name>")
+			}
+			focusCmd.Usage()
+			os.Exit(1)
+		}
+		focusContact(executor, *contactName, *jsonOutput)
 	case "send":
-		if *contactName == "" {
-			log.Fatal("Usage: wechat-debug send --contact <name> [--message <content>]")
+		sendCmd := flag.NewFlagSet("send", flag.ExitOnError)
+		contactName := sendCmd.String("contact", "", "Contact name to send to")
+		messageContent := sendCmd.String("message", "Test message from debugging script", "Message content to send")
+		if err := sendCmd.Parse(subArgs); err != nil {
+			log.Fatalf("Failed to parse send flags: %v", err)
 		}
-		sendMessage(executor, *contactName, *messageContent)
+		if *contactName == "" {
+			sendCmd.Usage = func() {
+				fmt.Println("Usage: wechat-debug send --contact <name> [--message <content>]")
+			}
+			sendCmd.Usage()
+			os.Exit(1)
+		}
+		sendMessage(executor, *contactName, *messageContent, *jsonOutput)
 	case "verify":
-		if *contactName == "" {
-			log.Fatal("Usage: wechat-debug verify --contact <name> [--message <content>]")
+		verifyCmd := flag.NewFlagSet("verify", flag.ExitOnError)
+		contactName := verifyCmd.String("contact", "", "Contact name to verify")
+		messageContent := verifyCmd.String("message", "Test message from debugging script", "Message content to verify")
+		if err := verifyCmd.Parse(subArgs); err != nil {
+			log.Fatalf("Failed to parse verify flags: %v", err)
 		}
-		verifyMessage(executor, *contactName, *messageContent)
+		if *contactName == "" {
+			verifyCmd.Usage = func() {
+				fmt.Println("Usage: wechat-debug verify --contact <name> [--message <content>]")
+			}
+			verifyCmd.Usage()
+			os.Exit(1)
+		}
+		verifyMessage(executor, *contactName, *messageContent, *jsonOutput)
 	case "full-test":
-		fullTestFlow(executor)
+		fullTestCmd := flag.NewFlagSet("full-test", flag.ExitOnError)
+		contactName := fullTestCmd.String("contact", "", "Contact name for test")
+		messageContent := fullTestCmd.String("message", "Test message from debugging script", "Message content to test")
+		if err := fullTestCmd.Parse(subArgs); err != nil {
+			log.Fatalf("Failed to parse full-test flags: %v", err)
+		}
+		fullTestFlow(executor, *contactName, *messageContent, *jsonOutput)
 	case "run-chain":
-		runChain(executor)
+		runChainCmd := flag.NewFlagSet("run-chain", flag.ExitOnError)
+		contactName := runChainCmd.String("contact", "", "Contact name for chain test")
+		messageContent := runChainCmd.String("message", "Test message from debugging script", "Message content for chain test")
+		if err := runChainCmd.Parse(subArgs); err != nil {
+			log.Fatalf("Failed to parse run-chain flags: %v", err)
+		}
+		if *contactName == "" {
+			runChainCmd.Usage = func() {
+				fmt.Println("Usage: wechat-debug run-chain --contact <name> [--message <content>]")
+			}
+			runChainCmd.Usage()
+			os.Exit(1)
+		}
+		runChain(executor, *contactName, *messageContent, *jsonOutput)
 	default:
 		printUsage()
 	}
@@ -223,13 +273,13 @@ func printUsage() {
 	fmt.Println("  wechat-debug run-chain --contact \"张三\" --message \"Test message\" --mock")
 }
 
-func findWeChatWindow(executor *UnifiedExecutor) {
+func findWeChatWindow(executor *UnifiedExecutor, jsonOutput bool) {
 	instances, result, err := executor.RunDetect()
 	if err != nil {
 		log.Fatalf("Failed to detect WeChat: %s", err)
 	}
 
-	if *jsonOutput {
+	if jsonOutput {
 		step := StepTrace{
 			Step:       "find-window",
 			Status:     string(result.Status),
@@ -250,7 +300,7 @@ func findWeChatWindow(executor *UnifiedExecutor) {
 	}
 }
 
-func listConversations(executor *UnifiedExecutor) {
+func listConversations(executor *UnifiedExecutor, jsonOutput bool) {
 	instances, _, err := executor.RunDetect()
 	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
@@ -261,7 +311,7 @@ func listConversations(executor *UnifiedExecutor) {
 		log.Fatalf("Failed to scan: %s", err)
 	}
 
-	if *jsonOutput {
+	if jsonOutput {
 		step := StepTrace{
 			Step:          "list-conversations",
 			Status:        string(scanResult.Status),
@@ -286,7 +336,7 @@ func listConversations(executor *UnifiedExecutor) {
 	}
 }
 
-func scanConversations(executor *UnifiedExecutor) {
+func scanConversations(executor *UnifiedExecutor, jsonOutput bool) {
 	instances, _, err := executor.RunDetect()
 	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
@@ -297,7 +347,7 @@ func scanConversations(executor *UnifiedExecutor) {
 		log.Fatalf("Failed to scan: %s", err)
 	}
 
-	if *jsonOutput {
+	if jsonOutput {
 		step := StepTrace{
 			Step:          "scan",
 			Status:        string(scanResult.Status),
@@ -322,7 +372,7 @@ func scanConversations(executor *UnifiedExecutor) {
 	}
 }
 
-func focusContact(executor *UnifiedExecutor, contactName string) {
+func focusContact(executor *UnifiedExecutor, contactName string, jsonOutput bool) {
 	instances, _, err := executor.RunDetect()
 	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
@@ -342,7 +392,7 @@ func focusContact(executor *UnifiedExecutor, contactName string) {
 
 	focusResult := executor.RunFocus(*targetConv)
 
-	if *jsonOutput {
+	if jsonOutput {
 		step := StepTrace{
 			Step:         "focus",
 			Status:       string(focusResult.Status),
@@ -364,7 +414,7 @@ func focusContact(executor *UnifiedExecutor, contactName string) {
 	}
 }
 
-func sendMessage(executor *UnifiedExecutor, contactName string, message string) {
+func sendMessage(executor *UnifiedExecutor, contactName string, message string, jsonOutput bool) {
 	instances, _, err := executor.RunDetect()
 	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
@@ -394,7 +444,7 @@ func sendMessage(executor *UnifiedExecutor, contactName string, message string) 
 	// Send the message
 	sendResult := executor.RunSend(*targetConv, message, "debug-script")
 
-	if *jsonOutput {
+	if jsonOutput {
 		step := StepTrace{
 			Step:         "send",
 			Status:       string(sendResult.Status),
@@ -416,7 +466,7 @@ func sendMessage(executor *UnifiedExecutor, contactName string, message string) 
 	}
 }
 
-func verifyMessage(executor *UnifiedExecutor, contactName string, message string) {
+func verifyMessage(executor *UnifiedExecutor, contactName string, message string, jsonOutput bool) {
 	instances, _, err := executor.RunDetect()
 	if err != nil || len(instances) == 0 {
 		log.Fatal("No WeChat window found")
@@ -437,7 +487,7 @@ func verifyMessage(executor *UnifiedExecutor, contactName string, message string
 	// Verify the message
 	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, message, 5*time.Second)
 
-	if *jsonOutput {
+	if jsonOutput {
 		step := StepTrace{
 			Step:         "verify",
 			Status:       string(verifyAdapterResult.Status),
@@ -460,7 +510,7 @@ func verifyMessage(executor *UnifiedExecutor, contactName string, message string
 	}
 }
 
-func fullTestFlow(executor *UnifiedExecutor) {
+func fullTestFlow(executor *UnifiedExecutor, contactName, messageContent string, jsonOutput bool) {
 	fmt.Println("=== WeChat Debugging Full Test Flow ===")
 	fmt.Println()
 
@@ -508,8 +558,8 @@ func fullTestFlow(executor *UnifiedExecutor) {
 
 	// Step 3: Focus on first contact (or specified contact)
 	var targetConv *protocol.ConversationRef
-	if *contactName != "" {
-		targetConv, err = executor.SelectConversation(conversations, *contactName)
+	if contactName != "" {
+		targetConv, err = executor.SelectConversation(conversations, contactName)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -537,7 +587,7 @@ func fullTestFlow(executor *UnifiedExecutor) {
 	// Step 4: Send test message
 	fmt.Println("Step 4: Sending test message...")
 	time.Sleep(200 * time.Millisecond)
-	sendResult := executor.RunSend(*targetConv, *messageContent, "debug-full-test")
+	sendResult := executor.RunSend(*targetConv, messageContent, "debug-full-test")
 	fmt.Printf("  Send confidence: %.2f\n", sendResult.Confidence)
 	executor.PrintDiagnostics("Send", sendResult)
 	fmt.Println()
@@ -553,7 +603,7 @@ func fullTestFlow(executor *UnifiedExecutor) {
 
 	// Step 5: Verify message
 	fmt.Println("Step 5: Verifying message delivery...")
-	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, *messageContent, 5*time.Second)
+	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, messageContent, 5*time.Second)
 	if verifyAdapterResult.Status == adapter.StatusSuccess {
 		fmt.Printf("  Verify confidence: %.2f\n", verifyAdapterResult.Confidence)
 		executor.PrintDiagnostics("Verify", verifyAdapterResult)
@@ -566,7 +616,7 @@ func fullTestFlow(executor *UnifiedExecutor) {
 	fmt.Println("=== Test Flow Complete ===")
 
 	// Print standardized JSON output if requested
-	if *jsonOutput {
+	if jsonOutput {
 		step5 := StepTrace{
 			Step:         "verify",
 			Status:       string(verifyAdapterResult.Status),
@@ -586,7 +636,7 @@ func fullTestFlow(executor *UnifiedExecutor) {
 	}
 }
 
-func runChain(executor *UnifiedExecutor) {
+func runChain(executor *UnifiedExecutor, contactName, messageContent string, jsonOutput bool) {
 	fmt.Println("=== Running Complete Chain: Scan -> Focus -> Send -> Verify ===")
 	fmt.Println()
 
@@ -636,8 +686,8 @@ func runChain(executor *UnifiedExecutor) {
 
 	// Step 3: Find and focus on target contact
 	var targetConv *protocol.ConversationRef
-	if *contactName != "" {
-		targetConv, err = executor.SelectConversation(conversations, *contactName)
+	if contactName != "" {
+		targetConv, err = executor.SelectConversation(conversations, contactName)
 		if err != nil {
 			log.Fatal(err)
 		}
@@ -666,7 +716,7 @@ func runChain(executor *UnifiedExecutor) {
 	// Step 4: Send message
 	fmt.Println("Step 4: Sending message...")
 	time.Sleep(200 * time.Millisecond)
-	sendResult := executor.RunSend(*targetConv, *messageContent, "debug-chain")
+	sendResult := executor.RunSend(*targetConv, messageContent, "debug-chain")
 	fmt.Printf("  Send confidence: %.2f\n", sendResult.Confidence)
 	fmt.Printf("  Send Diagnostics:\n")
 	executor.PrintDiagnostics("Send", sendResult)
@@ -683,7 +733,7 @@ func runChain(executor *UnifiedExecutor) {
 
 	// Step 5: Verify message delivery
 	fmt.Println("Step 5: Verifying message delivery...")
-	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, *messageContent, 5*time.Second)
+	verifyResult, verifyAdapterResult := executor.RunVerify(*targetConv, messageContent, 5*time.Second)
 	if verifyAdapterResult.Status == adapter.StatusSuccess {
 		fmt.Printf("  Verify confidence: %.2f\n", verifyAdapterResult.Confidence)
 		fmt.Printf("  Verify Diagnostics:\n")
@@ -697,7 +747,7 @@ func runChain(executor *UnifiedExecutor) {
 	fmt.Println("=== Chain Complete ===")
 
 	// Print standardized JSON output if requested
-	if *jsonOutput {
+	if jsonOutput {
 		step5 := StepTrace{
 			Step:         "verify",
 			Status:       string(verifyAdapterResult.Status),

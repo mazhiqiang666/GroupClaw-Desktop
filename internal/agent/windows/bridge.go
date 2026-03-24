@@ -6,7 +6,7 @@ import (
 	"syscall"
 	"unsafe"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
 )
 
 // 确保 Bridge 实现了 BridgeInterface 接口

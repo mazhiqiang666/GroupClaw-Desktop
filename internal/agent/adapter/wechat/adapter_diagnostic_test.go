@@ -3,8 +3,8 @@ package wechat
 import (
 	"testing"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
 )
 
 // controlledMockBridge 是一个用于最小闭环测试的 mock bridge，提供完全控制

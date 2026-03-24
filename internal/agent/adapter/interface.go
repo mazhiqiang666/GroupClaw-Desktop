@@ -3,7 +3,7 @@ package adapter
 import (
 	"time"
 
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // ChatAdapter 聊天软件适配器接口

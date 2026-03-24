@@ -4,9 +4,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // stateChangingMockBridge is a mock bridge that tracks node state changes

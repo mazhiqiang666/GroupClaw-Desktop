@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"github.com/yourorg/auto-customer-service/internal/gateway/server"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/gateway/server"
 )
 
 func main() {

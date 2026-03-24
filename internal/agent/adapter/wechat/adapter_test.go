@@ -3,9 +3,9 @@ package wechat
 import (
 	"testing"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // mockBridge 是一个用于测试的 mock bridge 实现

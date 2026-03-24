@@ -8,11 +8,11 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter/wechat"
-	"github.com/yourorg/auto-customer-service/internal/agent/comm"
-	"github.com/yourorg/auto-customer-service/internal/agent/idempotency"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter/wechat"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/comm"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/idempotency"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 func main() {

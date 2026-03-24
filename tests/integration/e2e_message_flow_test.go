@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/idempotency"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/idempotency"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // TestE2E_NewMessageToReplyExecute 测试完整消息流：new_message -> reply.execute -> send -> verify -> task.completed

@@ -3,7 +3,7 @@ package wechat
 import (
 	"testing"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
 )
 
 // ==================== Path System Tests ====================

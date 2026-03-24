@@ -3,7 +3,7 @@ package unit
 import (
 	"testing"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/idempotency"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/idempotency"
 )
 
 func TestIdempotencyStore(t *testing.T) {

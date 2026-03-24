@@ -1,4 +1,4 @@
-# Makefile for auto-customer-service
+# Makefile for GroupClaw-Desktop
 
 .PHONY: help test-rules test-adapter test-integration test-gateway test-all run-mock-chat run-gateway build clean
 

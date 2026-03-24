@@ -8,7 +8,7 @@ import (
 	"sync"
 
 	"github.com/gorilla/websocket"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // WebSocketClient WebSocket 客户端

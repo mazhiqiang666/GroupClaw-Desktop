@@ -3,8 +3,8 @@ package dispatcher
 import (
 	"log"
 
-	"github.com/yourorg/auto-customer-service/internal/gateway/session"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/gateway/session"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // CommandDispatcher 命令分发器

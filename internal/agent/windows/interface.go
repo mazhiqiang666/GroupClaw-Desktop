@@ -1,7 +1,7 @@
 package windows
 
 import (
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
 )
 
 // BridgeInterface 定义 Windows UIA 桥接器接口

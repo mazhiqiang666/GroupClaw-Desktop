@@ -3,7 +3,7 @@ package main
 import (
 	"log"
 
-	"github.com/yourorg/auto-customer-service/internal/mockchat"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/mockchat"
 )
 
 func main() {

@@ -6,9 +6,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // WeChatAdapter 微信桌面版适配器
@@ -681,15 +681,27 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		messageEvidence,
 	)
 
-	diagnostics := ConvertMessageEvidenceToDiagnostics(messageEvidence)
-	// Add non-applicable whitelist fields with default values
-	diagnostics["locate_source"] = "unknown"
-	diagnostics["evidence_count"] = "0"
-	diagnostics["content_length"] = strconv.Itoa(len(content))
-	// Add delivery state to diagnostics
+	// 合并诊断信息
+	diagnostics := make(map[string]string)
+	// 添加消息证据诊断
+	for k, v := range ConvertMessageEvidenceToDiagnostics(messageEvidence) {
+		diagnostics[k] = v
+	}
+	// 添加交付评估诊断
 	for k, v := range ConvertDeliveryAssessmentToDiagnostics(assessment) {
 		diagnostics[k] = v
 	}
+	// 添加聚焦证据诊断（简化版）
+	focusEvidence := FocusVerificationEvidence{
+		Confidence:    1.0,
+		LocateSource:  "send",
+		EvidenceCount: messageEvidence.NewMessageNodes,
+	}
+	for k, v := range ConvertFocusEvidenceToDiagnostics(focusEvidence) {
+		diagnostics[k] = v
+	}
+	// 添加内容长度
+	diagnostics["content_length"] = strconv.Itoa(len(content))
 
 	return adapter.Result{
 		Status:     adapter.StatusSuccess,
@@ -762,12 +774,25 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 	elapsedMs := time.Since(startTime).Milliseconds()
 
 	// Stub implementation: return nil message as expected by tests
-	diagnostics := ConvertDeliveryAssessmentToDiagnostics(assessment)
-	// Add non-applicable whitelist fields with default values
-	diagnostics["locate_source"] = "unknown"
-	diagnostics["evidence_count"] = "0"
-	diagnostics["new_message_nodes"] = "0"
-	diagnostics["message_content_match"] = "false"
+	// 合并诊断信息
+	diagnostics := make(map[string]string)
+	// 添加消息证据诊断
+	for k, v := range ConvertMessageEvidenceToDiagnostics(messageEvidence) {
+		diagnostics[k] = v
+	}
+	// 添加交付评估诊断
+	for k, v := range ConvertDeliveryAssessmentToDiagnostics(assessment) {
+		diagnostics[k] = v
+	}
+	// 添加聚焦证据诊断（简化版）
+	focusEvidence := FocusVerificationEvidence{
+		Confidence:    1.0,
+		LocateSource:  "verify",
+		EvidenceCount: messageEvidence.NewMessageNodes,
+	}
+	for k, v := range ConvertFocusEvidenceToDiagnostics(focusEvidence) {
+		diagnostics[k] = v
+	}
 
 	return nil, adapter.Result{
 		Status:     adapter.StatusSuccess,

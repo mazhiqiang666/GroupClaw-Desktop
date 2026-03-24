@@ -4,7 +4,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // Session 会话连接

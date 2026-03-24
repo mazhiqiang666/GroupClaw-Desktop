@@ -8,11 +8,11 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/yourorg/auto-customer-service/internal/gateway/dispatcher"
-	"github.com/yourorg/auto-customer-service/internal/gateway/handler"
-	"github.com/yourorg/auto-customer-service/internal/gateway/router"
-	"github.com/yourorg/auto-customer-service/internal/gateway/session"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/gateway/dispatcher"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/gateway/handler"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/gateway/router"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/gateway/session"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // Server HTTP/WebSocket 服务器

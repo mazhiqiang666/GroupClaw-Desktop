@@ -4,8 +4,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // VerificationEngine handles all verification logic for WeChat adapter

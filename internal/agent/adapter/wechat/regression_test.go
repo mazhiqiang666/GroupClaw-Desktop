@@ -3,8 +3,8 @@ package wechat
 import (
 	"testing"
 
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
-	"github.com/yourorg/auto-customer-service/pkg/protocol"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 // ==================== High-Risk Regression Matrix Tests ====================

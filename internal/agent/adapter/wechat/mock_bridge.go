@@ -1,8 +1,8 @@
 package wechat
 
 import (
-	"github.com/yourorg/auto-customer-service/internal/agent/adapter"
-	"github.com/yourorg/auto-customer-service/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
 )
 
 // ControlledMockBridge is a mock bridge for controlled testing with full control over behavior
