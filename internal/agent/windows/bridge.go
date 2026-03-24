@@ -24,6 +24,7 @@ var (
 	procCoUninitialize      = modole32.NewProc("CoUninitialize")
 	procCoCreateInstance    = modole32.NewProc("CoCreateInstance")
 	procCoTaskMemFree       = modole32.NewProc("CoTaskMemFree")
+	procCLSIDFromString     = modole32.NewProc("CLSIDFromString")
 	procAccessibleObjectFromWindow = modoleacc.NewProc("AccessibleObjectFromWindow")
 	procFindWindow          = moduser32.NewProc("FindWindowW")
 	procFindWindowEx        = moduser32.NewProc("FindWindowExW")

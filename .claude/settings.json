@@ -97,7 +97,15 @@
       "Bash(powershell \"Remove-Item -Recurse -Force ''D:\\\\go\\\\go-win7.backup_'' -ErrorAction SilentlyContinue; echo ''Backup directory removed''\")",
       "Bash(powershell \"Remove-Item -Force ''D:\\\\go\\\\go-win7.tar.gz'' -ErrorAction SilentlyContinue; echo ''Old tar.gz removed''\")",
       "Bash(where gopls:*)",
-      "Bash(\"D:\\\\go\\\\go-win7\\\\bin\\\\go.exe\" test:*)"
+      "Bash(\"D:\\\\go\\\\go-win7\\\\bin\\\\go.exe\" test:*)",
+      "Bash(./bridge-dump.exe find-wechat:*)",
+      "Bash(./bridge-dump.exe debug-windows:*)",
+      "Bash(./bridge-dump.exe debug-accessible:*)",
+      "Bash(./bridge-dump.exe debug-nodes:*)",
+      "Bash(./bridge-dump debug-accessible:*)",
+      "Bash(./bridge-dump debug-nodes:*)",
+      "Bash(./wechat-debug scan:*)",
+      "Bash(./bridge-dump.exe debug-uia:*)"
     ],
     "additionalDirectories": [
       "D:\\go\\project\\pkg\\mod\\golang.org\\toolchain@v0.0.1-go1.25.0.windows-amd64\\bin",

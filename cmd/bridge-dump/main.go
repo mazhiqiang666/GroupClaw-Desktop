@@ -131,6 +131,22 @@ func main() {
 			}
 		}
 		debugNodes(bridge, uintptr(handle), count)
+	case "debug-uia":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-uia <window-handle> [count]")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		count := 20
+		if len(args) >= 3 {
+			count, err = strconv.Atoi(args[2])
+			if err != nil {
+				count = 20
+			}
+		}
+		debugUIA(bridge, uintptr(handle), count)
 	default:
 		printUsage()
 	}
@@ -150,6 +166,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump debug-windows            - Debug: List all detected windows")
 	fmt.Println("  bridge-dump debug-accessible <handle> - Debug: Accessible object diagnostics")
 	fmt.Println("  bridge-dump debug-nodes <handle> [N] - Debug: First N nodes with detailed info")
+	fmt.Println("  bridge-dump debug-uia <handle> [N]   - Debug: First N UIA nodes")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
@@ -989,5 +1006,91 @@ func getDiagnosticValue(diagnostics []adapter.Diagnostic, key, defaultValue stri
 		}
 	}
 	return defaultValue
+}
+
+// debugUIA 调试UIA节点
+func debugUIA(bridge windows.BridgeInterface, handle uintptr, count int) {
+	fmt.Printf("=== Debug: UIA First %d Nodes for Handle: 0x%X (%d) ===\n\n", count, handle, handle)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	fmt.Printf("Window Information:\n")
+	fmt.Printf("  Handle: 0x%X (%d)\n", handle, handle)
+	fmt.Printf("  Class: %s\n", info.Class)
+	fmt.Printf("  Title: %s\n", info.Title)
+	fmt.Println()
+
+	// 创建UIA桥接器
+	uiaBridge := windows.NewUIABridge()
+	defer uiaBridge.ReleaseUIA()
+
+	// 枚举UIA节点
+	nodes, result := uiaBridge.EnumerateUIANodes(handle, count)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to enumerate UIA nodes: %s\n", result.Error)
+
+		// 显示诊断信息
+		if len(result.Diagnostics) > 0 {
+			fmt.Printf("Diagnostics:\n")
+			for _, diag := range result.Diagnostics {
+				fmt.Printf("  - %s\n", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("    %s: %s\n", k, v)
+				}
+			}
+		}
+		return
+	}
+
+	// 显示诊断信息
+	if len(result.Diagnostics) > 0 {
+		fmt.Printf("UIA Enumeration Diagnostics:\n")
+		for _, diag := range result.Diagnostics {
+			fmt.Printf("  - %s\n", diag.Message)
+			for k, v := range diag.Context {
+				fmt.Printf("    %s: %s\n", k, v)
+			}
+		}
+		fmt.Println()
+	}
+
+	fmt.Printf("Total UIA nodes found: %d\n", len(nodes))
+	fmt.Printf("Showing first %d UIA nodes:\n\n", count)
+
+	displayCount := count
+	if len(nodes) < displayCount {
+		displayCount = len(nodes)
+	}
+
+	for i := 0; i < displayCount; i++ {
+		node := nodes[i]
+		fmt.Printf("UIA Node [%d]:\n", i)
+		fmt.Printf("  Name: %s\n", node.Name)
+		fmt.Printf("  ControlType: %s\n", node.ControlType)
+		fmt.Printf("  AutomationId: %s\n", node.AutomationId)
+		fmt.Printf("  ClassName: %s\n", node.ClassName)
+		fmt.Printf("  Depth: %d\n", node.Depth)
+		if node.Bounds[2] > 0 && node.Bounds[3] > 0 {
+			fmt.Printf("  Bounds: left=%d, top=%d, width=%d, height=%d\n",
+				node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3])
+		}
+		fmt.Println()
+	}
+
+	if len(nodes) == 0 {
+		fmt.Printf("WARNING: No UIA nodes found.\n")
+		fmt.Printf("Possible reasons:\n")
+		fmt.Printf("  1. UIA not supported by this application\n")
+		fmt.Printf("  2. UIA initialization failed\n")
+		fmt.Printf("  3. Window handle may not represent a valid UI element\n")
+		fmt.Printf("\nCheck diagnostics above for more details.\n")
+	}
+
+	fmt.Println("=== Debug UIA Complete ===")
 }
 
