@@ -4,6 +4,14 @@ import (
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
 )
 
+// InputBoxRect 输入框矩形和特征
+type InputBoxRect struct {
+	X      int `json:"x"`
+	Y      int `json:"y"`
+	Width  int `json:"width"`
+	Height int `json:"height"`
+}
+
 // BridgeInterface 定义 Windows UIA 桥接器接口
 // 为 WeChat adapter 提供最小可调用的 Windows 操作接口
 type BridgeInterface interface {
@@ -60,6 +68,12 @@ type BridgeInterface interface {
 
 	// DetectConversations 视觉检测会话列表
 	DetectConversations(windowHandle uintptr) (VisionDebugResult, adapter.Result)
+
+	// DetectInputBoxArea 检测输入框区域
+	DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) (InputBoxRect, adapter.Result)
+
+	// GetInputBoxClickPoint 获取输入框点击坐标
+	GetInputBoxClickPoint(inputBox InputBoxRect) (x, y int, clickSource string)
 }
 
 // AccessibleNode 可访问节点信息

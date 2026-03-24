@@ -43,6 +43,11 @@ type SendVerificationEvidence struct {
 	ScreenshotChanged bool
 	ChatAreaDiff      float64
 
+	// Send failure detection
+	SuspectedSendFailed bool
+	SendFailureReason   string
+	FailureSignalSource string
+
 	// Confidence
 	Confidence float64
 }
@@ -475,6 +480,18 @@ func (r *MessageVerificationRules) VerifyMessageSend(
 			beforeScreenshot, afterScreenshot, chatAreaBounds)
 	}
 
+	// Evidence 4: Send failure detection (basic heuristic)
+	// If no new message nodes detected and low screenshot change, suspect send failure
+	if evidence.NewMessageNodes <= 0 && evidence.ChatAreaDiff < 0.05 {
+		evidence.SuspectedSendFailed = true
+		evidence.SendFailureReason = "no_new_message_nodes_and_low_screenshot_change"
+		evidence.FailureSignalSource = "basic_heuristic"
+	} else {
+		evidence.SuspectedSendFailed = false
+		evidence.SendFailureReason = ""
+		evidence.FailureSignalSource = ""
+	}
+
 	// Calculate confidence
 	evidence.Confidence = r.calculateConfidence(evidence)
 
@@ -509,6 +526,16 @@ func (r *MessageVerificationRules) calculateConfidence(evidence SendVerification
 		score += 0.1
 	}
 	totalWeight += 0.1
+
+	// Send failure detection penalty: -30% if suspected send failure
+	if evidence.SuspectedSendFailed {
+		score -= 0.3
+		// Ensure score doesn't go below 0
+		if score < 0 {
+			score = 0
+		}
+	}
+	totalWeight += 0.3 // Add weight for send failure detection
 
 	if totalWeight == 0 {
 		return 0
@@ -645,6 +672,10 @@ func ConvertMessageEvidenceToDiagnostics(evidence SendVerificationEvidence) map[
 		"message_content_match":  strconv.FormatBool(evidence.MessageContentMatch),
 		"screenshot_changed":     strconv.FormatBool(evidence.ScreenshotChanged),
 		"chat_area_diff":         fmt.Sprintf("%.2f", evidence.ChatAreaDiff),
+		"suspected_send_failed":  strconv.FormatBool(evidence.SuspectedSendFailed),
+		"send_failure_reason":    evidence.SendFailureReason,
+		"failure_signal_source":  evidence.FailureSignalSource,
+		"send_verification_quality": "basic_heuristic", // Placeholder for future enhancement
 		"confidence":             fmt.Sprintf("%.2f", evidence.Confidence),
 	}
 }

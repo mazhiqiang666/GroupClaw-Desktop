@@ -889,7 +889,40 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		focusConfidenceFloat = conf
 	}
 
-	// 阶段2: 发送前捕获消息区域节点（用于后续差异比较）
+	// 阶段2: 检测并点击输入框（解决发送失败问题）
+	inputBoxClicked := false
+	inputClickX := 0
+	inputClickY := 0
+	inputClickSource := "not_attempted"
+
+	// 检测左侧边栏矩形（通过视觉检测会话列表）
+	visionResult, visionDetectResult := a.bridge.DetectConversations(conv.HostWindowHandle)
+	if visionDetectResult.Status == adapter.StatusSuccess {
+		// 检测输入框区域（使用视觉检测到的窗口尺寸）
+		inputBoxRect, inputBoxResult := a.bridge.DetectInputBoxArea(
+			conv.HostWindowHandle,
+			visionResult.LeftSidebarRect,
+			visionResult.WindowWidth,
+			visionResult.WindowHeight,
+		)
+
+		if inputBoxResult.Status == adapter.StatusSuccess {
+			// 获取输入框点击坐标
+			clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(inputBoxRect)
+			// 点击输入框
+			clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+			if clickResult.Status == adapter.StatusSuccess {
+				inputBoxClicked = true
+				inputClickX = clickX
+				inputClickY = clickY
+				inputClickSource = clickSource
+				// 等待点击生效
+				time.Sleep(100 * time.Millisecond)
+			}
+		}
+	}
+
+	// 阶段3: 发送前捕获消息区域节点（用于后续差异比较）
 	nodesBefore, nodesBeforeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
 	if nodesBeforeResult.Status != adapter.StatusSuccess {
 		nodesBefore = nil
@@ -998,6 +1031,14 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		diagnostics["focus_confidence_low"] = "true"
 		// 可以考虑降级处理逻辑，但当前仅记录诊断
 	}
+
+	// 添加输入框点击诊断字段
+	diagnostics["input_box_clicked"] = strconv.FormatBool(inputBoxClicked)
+	diagnostics["input_click_x"] = strconv.Itoa(inputClickX)
+	diagnostics["input_click_y"] = strconv.Itoa(inputClickY)
+	diagnostics["input_click_source"] = inputClickSource
+	diagnostics["paste_executed"] = "true"  // 当前流程中必定执行粘贴
+	diagnostics["enter_executed"] = "true"   // 当前流程中必定执行发送
 
 	// 添加内容长度
 	diagnostics["content_length"] = strconv.Itoa(len(content))

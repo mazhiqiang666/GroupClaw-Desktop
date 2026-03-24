@@ -1535,3 +1535,230 @@ func (b *Bridge) FocusConversationByVision(windowHandle uintptr, strategy string
 		Diagnostics: diagnostics,
 	}
 }
+
+
+// DetectInputBoxArea 检测输入框区域
+// 基于窗口尺寸和左侧边栏矩形几何定位输入框
+func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) (InputBoxRect, adapter.Result) {
+	// 默认值：如果检测失败，返回基于几何推测的矩形
+	defaultRect := InputBoxRect{
+		X:      leftSidebarRect[0] + leftSidebarRect[2] + 20, // 左侧边栏右侧 + 边距
+		Y:      windowHeight - 100,                           // 窗口底部向上100px
+		Width:  windowWidth - leftSidebarRect[2] - 40,        // 剩余宽度减去边距
+		Height: 80,                                           // 输入框高度约80px
+	}
+
+	// 获取窗口截图进行简单验证（可选）
+	pixels, captureResult := b.CaptureWindow(windowHandle)
+	if captureResult.Status != adapter.StatusSuccess {
+		// 截图失败，返回几何推测值
+		return defaultRect, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "warn",
+					Message:   "Input box detection fell back to geometric estimation (screenshot failed)",
+					Context: map[string]string{
+						"estimation_method": "geometric_fallback",
+						"input_box_x":       strconv.Itoa(defaultRect.X),
+						"input_box_y":       strconv.Itoa(defaultRect.Y),
+						"input_box_width":   strconv.Itoa(defaultRect.Width),
+						"input_box_height":  strconv.Itoa(defaultRect.Height),
+					},
+				},
+			},
+		}
+	}
+
+	// 将BGR转换为RGBA进行简单分析
+	rowSize := ((windowWidth*24 + 31) / 32) * 4
+	img, err := bgrToRGBA(pixels, windowWidth, windowHeight, rowSize)
+	if err != nil {
+		// 转换失败，返回几何推测值
+		return defaultRect, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "warn",
+					Message:   "Input box detection fell back to geometric estimation (image conversion failed)",
+					Context: map[string]string{
+						"estimation_method": "geometric_fallback",
+						"input_box_x":       strconv.Itoa(defaultRect.X),
+						"input_box_y":       strconv.Itoa(defaultRect.Y),
+						"input_box_width":   strconv.Itoa(defaultRect.Width),
+						"input_box_height":  strconv.Itoa(defaultRect.Height),
+					},
+				},
+			},
+		}
+	}
+
+	// 简单启发式：在窗口右下区域寻找可能的输入框
+	// 输入框通常在右侧底部，高度约60-100px，宽度占右侧区域大部分
+	rightAreaStartX := leftSidebarRect[0] + leftSidebarRect[2]
+	rightAreaWidth := windowWidth - rightAreaStartX
+	bottomAreaStartY := windowHeight - 150 // 从底部向上150px开始搜索
+
+	if rightAreaWidth <= 0 || bottomAreaStartY < 0 {
+		// 区域无效，返回几何推测值
+		return defaultRect, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+		}
+	}
+
+	// 搜索可能的输入框（简单亮度分析）
+	bestRect := defaultRect
+	bestScore := 0
+
+	// 扫描可能的输入框位置和尺寸
+	for y := bottomAreaStartY; y < windowHeight-40; y += 10 {
+		for height := 60; height <= 100; height += 10 {
+			if y+height > windowHeight {
+				continue
+			}
+			for width := rightAreaWidth / 2; width <= rightAreaWidth; width += 20 {
+				if width < 100 {
+					continue
+				}
+				x := rightAreaStartX + (rightAreaWidth-width)/2 // 居中
+
+				// 计算区域平均亮度（输入框通常较亮）
+				brightness := computeRectAverageBrightness(img, x, y, width, height)
+				// 计算边缘密度（输入框可能有边框）
+				edgeDensity := computeRectEdgeDensity(img, x, y, width, height)
+
+				score := brightness + edgeDensity*2
+
+				if score > bestScore {
+					bestScore = score
+					bestRect = InputBoxRect{
+						X:      x,
+						Y:      y,
+						Width:  width,
+						Height: height,
+					}
+				}
+			}
+		}
+	}
+
+	// 如果找到合理区域，返回检测结果
+	if bestScore > 50 {
+		return bestRect, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Input box detected with visual analysis",
+					Context: map[string]string{
+						"detection_method": "visual_analysis",
+						"input_box_x":      strconv.Itoa(bestRect.X),
+						"input_box_y":      strconv.Itoa(bestRect.Y),
+						"input_box_width":  strconv.Itoa(bestRect.Width),
+						"input_box_height": strconv.Itoa(bestRect.Height),
+						"detection_score":  strconv.Itoa(bestScore),
+					},
+				},
+			},
+		}
+	}
+
+	// 否则返回几何推测值
+	return defaultRect, adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Input box detection fell back to geometric estimation",
+				Context: map[string]string{
+					"estimation_method": "geometric_fallback",
+					"input_box_x":       strconv.Itoa(defaultRect.X),
+					"input_box_y":       strconv.Itoa(defaultRect.Y),
+					"input_box_width":   strconv.Itoa(defaultRect.Width),
+					"input_box_height":  strconv.Itoa(defaultRect.Height),
+				},
+			},
+		},
+	}
+}
+
+// GetInputBoxClickPoint 获取输入框点击坐标
+// 优先点击输入框中部偏左位置，避免点到表情/附件按钮
+func (b *Bridge) GetInputBoxClickPoint(inputBox InputBoxRect) (x, y int, clickSource string) {
+	// 点击输入框左侧1/3处，垂直居中
+	x = inputBox.X + inputBox.Width/3
+	y = inputBox.Y + inputBox.Height/2
+	return x, y, "input_box_left_third"
+}
+
+// computeRectAverageBrightness 计算矩形区域平均亮度
+func computeRectAverageBrightness(img *image.RGBA, x, y, width, height int) int {
+	if img == nil || width <= 0 || height <= 0 {
+		return 0
+	}
+
+	bounds := img.Bounds()
+	if x < bounds.Min.X || y < bounds.Min.Y || x+width > bounds.Max.X || y+height > bounds.Max.Y {
+		return 0
+	}
+
+	totalBrightness := 0
+	pixelCount := 0
+
+	for dy := 0; dy < height; dy++ {
+		for dx := 0; dx < width; dx++ {
+			c := img.RGBAAt(x+dx, y+dy)
+			brightness := (int(c.R) + int(c.G) + int(c.B)) / 3
+			totalBrightness += brightness
+			pixelCount++
+		}
+	}
+
+	if pixelCount == 0 {
+		return 0
+	}
+	return totalBrightness / pixelCount
+}
+
+// computeRectEdgeDensity 计算矩形区域边缘密度
+func computeRectEdgeDensity(img *image.RGBA, x, y, width, height int) int {
+	if img == nil || width <= 1 || height <= 1 {
+		return 0
+	}
+
+	bounds := img.Bounds()
+	if x < bounds.Min.X || y < bounds.Min.Y || x+width > bounds.Max.X || y+height > bounds.Max.Y {
+		return 0
+	}
+
+	edgeCount := 0
+	totalPixels := (width - 1) * (height - 1)
+
+	for dy := 0; dy < height-1; dy++ {
+		for dx := 0; dx < width-1; dx++ {
+			c1 := img.RGBAAt(x+dx, y+dy)
+			c2 := img.RGBAAt(x+dx+1, y+dy)
+			c3 := img.RGBAAt(x+dx, y+dy+1)
+
+			// 简单边缘检测
+			if colorDiff(c1, c2) > 20 || colorDiff(c1, c3) > 20 {
+				edgeCount++
+			}
+		}
+	}
+
+	if totalPixels == 0 {
+		return 0
+	}
+	// 返回每100像素的边缘密度
+	return edgeCount * 100 / totalPixels
+}
