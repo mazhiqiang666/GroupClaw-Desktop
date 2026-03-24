@@ -67,30 +67,44 @@ func NewSessionCandidateRules() *SessionCandidateRules {
 
 // IsCandidateConversation determines if a node represents a candidate conversation
 func (r *SessionCandidateRules) IsCandidateConversation(node windows.AccessibleNode, windowWidth int) bool {
-	// Rule 1: Check role - must be list item
-	if node.Role != "list item" && node.Role != "ListItem" {
-		return false
-	}
-
-	// Rule 2: Check name is non-empty
+	// Rule 1: Check name is non-empty (most important)
 	if node.Name == "" {
 		return false
 	}
 
-	// Rule 3: Check bounds are valid
+	// Rule 2: Check bounds are valid (but allow some flexibility)
 	if len(node.Bounds) != 4 {
 		return false
 	}
 	bounds := node.Bounds
-	// Check for negative or zero dimensions
-	if bounds[0] < 0 || bounds[1] < 0 || bounds[2] <= 0 || bounds[3] <= 0 {
+	// Check for negative or zero dimensions (but allow slightly negative positions)
+	if bounds[0] < -50 || bounds[1] < -50 || bounds[2] <= 0 || bounds[3] <= 0 {
 		return false
 	}
 
-	// Rule 4: Check position - must be in left 1/3 of window (contact list area)
-	listAreaThreshold := windowWidth / 3
-	if bounds[0] > listAreaThreshold {
-		return false
+	// Rule 3: Accept a wider range of roles for real WeChat
+	acceptableRoles := map[string]bool{
+		"list item": true,
+		"ListItem": true,
+		"text": true,
+		"static": true,
+		"client": true,
+		"pane": true,
+		"window": true,
+		"": true, // Allow empty role for debugging
+	}
+	if !acceptableRoles[node.Role] {
+		// Still allow if name looks like a contact name (contains non-ASCII or spaces)
+		hasNonASCII := false
+		for _, r := range node.Name {
+			if r > 127 {
+				hasNonASCII = true
+				break
+			}
+		}
+		if !hasNonASCII && len(node.Name) < 2 {
+			return false
+		}
 	}
 
 	return true

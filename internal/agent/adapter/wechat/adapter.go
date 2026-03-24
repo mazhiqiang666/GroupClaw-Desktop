@@ -321,9 +321,26 @@ func (a *WeChatAdapter) Scan(instance protocol.AppInstanceRef) ([]protocol.Conve
 
 	// 获取窗口宽度用于 bounds 检查
 	windowWidth := GetWindowWidthFromNodes(flatNodes)
+	// 添加窗口宽度到诊断信息
+	diagnostics["window_width"] = strconv.Itoa(windowWidth)
+	diagnostics["flat_nodes_count"] = strconv.Itoa(len(flatNodes))
 
 	// 使用规则模块筛选候选会话
 	candidates := a.sessionCandidateRules.FilterCandidateConversations(flatNodes, windowWidth)
+
+	// 如果候选为空，使用宽松的过滤器作为回退
+	if len(candidates) == 0 && len(flatNodes) > 0 {
+		diagnostics["fallback_used"] = "true"
+		// 简单的宽松过滤器：有名称且边界有效
+		for _, node := range flatNodes {
+			if node.Name != "" && len(node.Bounds) == 4 {
+				bounds := node.Bounds
+				if bounds[0] >= -50 && bounds[1] >= -50 && bounds[2] > 0 && bounds[3] > 0 {
+					candidates = append(candidates, node)
+				}
+			}
+		}
+	}
 
 	// 转换为会话引用
 	conversations := []protocol.ConversationRef{}
@@ -570,20 +587,102 @@ func (a *WeChatAdapter) focusByListPosition(conv protocol.ConversationRef, start
 
 // Read 读取消息
 func (a *WeChatAdapter) Read(conv protocol.ConversationRef, limit int) ([]protocol.MessageObs, adapter.Result) {
-	// 截图窗口用于 OCR 识别（stub 实现）
-	_, result := a.bridge.CaptureWindow(conv.HostWindowHandle)
-	if result.Status != adapter.StatusSuccess {
-		return nil, result
+	startTime := time.Now()
+
+	// 枚举可访问节点
+	nodes, nodeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
+	if nodeResult.Status != adapter.StatusSuccess {
+		return nil, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("NODE_ENUM_FAILED"),
+			Error:      "Failed to enumerate accessible nodes",
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "error",
+					Message:   "Node enumeration failed in Read",
+					Context: map[string]string{
+						"host_window_handle": strconv.FormatUint(uint64(conv.HostWindowHandle), 10),
+						"locate_source":      "read",
+						"evidence_count":     "0",
+					},
+				},
+			},
+		}
 	}
 
-	// TODO: 实现 OCR 文字识别
-	// 当前返回空消息列表作为 stub
+	// 扁平化节点树
+	flatNodes := a.pathSystem.FlattenNodesWithPath(nodes, "", 0, 10)
+
+	// 过滤消息区域节点
+	messageNodes := a.messageClassifier.FilterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
+
+	// 转换为消息观察结果
 	messages := []protocol.MessageObs{}
+	for i, node := range messageNodes {
+		if limit > 0 && len(messages) >= limit {
+			break
+		}
+		// 创建基础消息观察结果
+		msg := protocol.MessageObs{
+			MessageID:          fmt.Sprintf("read_%d_%d", conv.HostWindowHandle, i),
+			ConversationID:     conv.DisplayName,
+			SenderSide:         "unknown",
+			NormalizedText:     node.Name,
+			Timestamp:          time.Now(),
+			ObservedAt:         time.Now(),
+			MessageFingerprint: fmt.Sprintf("node_%s_%s", node.TreePath, node.Name),
+			NeighborFingerprint: fmt.Sprintf("bounds_%d_%d_%d_%d", node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3]),
+		}
+		messages = append(messages, msg)
+	}
+
+	elapsedMs := time.Since(startTime).Milliseconds()
+
+	if len(messages) == 0 {
+		return messages, adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonCode("NO_MESSAGES_FOUND"),
+			Confidence: 0.0,
+			ElapsedMs:  elapsedMs,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "No message nodes found in conversation",
+					Context: map[string]string{
+						"host_window_handle": strconv.FormatUint(uint64(conv.HostWindowHandle), 10),
+						"flat_nodes_count":   strconv.Itoa(len(flatNodes)),
+						"message_nodes_found": strconv.Itoa(len(messageNodes)),
+						"locate_source":      "read",
+						"evidence_count":     "0",
+					},
+				},
+			},
+		}
+	}
+
 	return messages, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
-		Confidence: 1.0,
-		ElapsedMs:  0,
+		Confidence: 0.7,
+		ElapsedMs:  elapsedMs,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Successfully read messages from accessible nodes",
+				Context: map[string]string{
+					"host_window_handle": strconv.FormatUint(uint64(conv.HostWindowHandle), 10),
+					"flat_nodes_count":   strconv.Itoa(len(flatNodes)),
+					"message_nodes_found": strconv.Itoa(len(messageNodes)),
+					"messages_returned":   strconv.Itoa(len(messages)),
+					"locate_source":      "read",
+					"evidence_count":     strconv.Itoa(len(messageNodes)),
+				},
+			},
+		},
 	}
 }
 
@@ -773,7 +872,25 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 
 	elapsedMs := time.Since(startTime).Milliseconds()
 
-	// Stub implementation: return nil message as expected by tests
+	// 创建消息观察结果
+	var verifiedMessage *protocol.MessageObs
+	if assessment.Confidence >= 0.5 {
+		// 构建验证通过的消息观察
+		verifiedMessage = &protocol.MessageObs{
+			MessageID:          fmt.Sprintf("verify_%d_%d", conv.HostWindowHandle, time.Now().UnixNano()),
+			ConversationID:     conv.DisplayName,
+			SenderSide:         "self",
+			NormalizedText:     content,
+			Timestamp:          time.Now(),
+			ObservedAt:         time.Now(),
+			MessageFingerprint: fmt.Sprintf("verify_%s_%s", conv.DisplayName, content),
+			NeighborFingerprint: fmt.Sprintf("confidence_%.2f_nodes_%d", assessment.Confidence, messageEvidence.NewMessageNodes),
+		}
+	} else {
+		// 验证置信度低，返回nil
+		verifiedMessage = nil
+	}
+
 	// 合并诊断信息
 	diagnostics := make(map[string]string)
 	// 添加消息证据诊断
@@ -794,7 +911,11 @@ func (a *WeChatAdapter) Verify(conv protocol.ConversationRef, content string, ti
 		diagnostics[k] = v
 	}
 
-	return nil, adapter.Result{
+	// 添加验证结果诊断
+	diagnostics["verified_message_returned"] = strconv.FormatBool(verifiedMessage != nil)
+	diagnostics["verification_confidence"] = fmt.Sprintf("%.2f", assessment.Confidence)
+
+	return verifiedMessage, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
 		Confidence: assessment.Confidence,

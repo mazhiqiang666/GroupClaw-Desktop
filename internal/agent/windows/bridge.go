@@ -3,7 +3,9 @@
 package windows
 
 import (
+	"strconv"
 	"syscall"
+	"time"
 	"unsafe"
 
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
@@ -426,6 +428,20 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 		return nodes, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "warning",
+					Message:   "GetAccessible failed, falling back to window node",
+					Context: map[string]string{
+						"window_handle": strconv.FormatUint(uint64(windowHandle), 10),
+						"window_class":  info.Class,
+						"window_title":  info.Title,
+						"error":         result.Error,
+						"reason_code":   string(result.ReasonCode),
+					},
+				},
+			},
 		}
 	}
 
