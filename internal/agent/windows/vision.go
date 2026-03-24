@@ -243,6 +243,90 @@ func drawUnreadDotRect(img *image.RGBA, rect image.Rectangle) {
 	}
 }
 
+// 绘制输入框矩形
+func drawInputBoxRect(img *image.RGBA, rect image.Rectangle) {
+	// 使用紫色边框表示输入框
+	rectColor := color.RGBA{R: 255, G: 0, B: 255, A: 200}
+
+	// 绘制矩形边框（2像素宽）
+	for x := rect.Min.X; x < rect.Max.X; x++ {
+		for y := rect.Min.Y; y < rect.Min.Y+2; y++ { // 上边框
+			if y < img.Bounds().Max.Y {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+		for y := rect.Max.Y - 2; y < rect.Max.Y; y++ { // 下边框
+			if y < img.Bounds().Max.Y {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+	}
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Min.X+2; x++ { // 左边框
+			if x < img.Bounds().Max.X {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+		for x := rect.Max.X - 2; x < rect.Max.X; x++ { // 右边框
+			if x < img.Bounds().Max.X {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+	}
+}
+
+// saveInputBoxDebugImage 保存输入框调试图像
+func saveInputBoxDebugImage(img *image.RGBA, inputBoxRect InputBoxRect, leftSidebarRect [4]int, windowWidth, windowHeight int) (string, error) {
+	// 创建调试目录
+	debugDir := filepath.Join(os.TempDir(), "wechat_inputbox_debug")
+	if err := os.MkdirAll(debugDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create debug directory: %v", err)
+	}
+
+	// 创建带标注的图像
+	annotated := image.NewRGBA(img.Bounds())
+	draw.Draw(annotated, img.Bounds(), img, image.Point{}, draw.Src)
+
+	// 绘制左侧边栏区域（如果有效）
+	if leftSidebarRect[2] > 0 && leftSidebarRect[3] > 0 {
+		sidebarRect := image.Rect(
+			leftSidebarRect[0],
+			leftSidebarRect[1],
+			leftSidebarRect[0]+leftSidebarRect[2],
+			leftSidebarRect[1]+leftSidebarRect[3],
+		)
+		drawSidebarRect(annotated, sidebarRect)
+	}
+
+	// 绘制输入框矩形
+	if inputBoxRect.Width > 0 && inputBoxRect.Height > 0 {
+		inputRect := image.Rect(
+			inputBoxRect.X,
+			inputBoxRect.Y,
+			inputBoxRect.X+inputBoxRect.Width,
+			inputBoxRect.Y+inputBoxRect.Height,
+		)
+		drawInputBoxRect(annotated, inputRect)
+	}
+
+	// 保存PNG文件
+	timestamp := time.Now().UnixNano()
+	filename := fmt.Sprintf("inputbox_debug_%d.png", timestamp)
+	filepath := filepath.Join(debugDir, filename)
+
+	file, err := os.Create(filepath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create debug image file: %v", err)
+	}
+	defer file.Close()
+
+	if err := png.Encode(file, annotated); err != nil {
+		return "", fmt.Errorf("failed to encode PNG: %v", err)
+	}
+
+	return filepath, nil
+}
+
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -1649,6 +1733,26 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 
 	// 如果找到合理区域，返回检测结果
 	if bestScore > 50 {
+		// 生成调试图像
+		debugImagePath := ""
+		if img != nil {
+			if path, err := saveInputBoxDebugImage(img, bestRect, leftSidebarRect, windowWidth, windowHeight); err == nil {
+				debugImagePath = path
+			}
+		}
+
+		context := map[string]string{
+			"detection_method": "visual_analysis",
+			"input_box_x":      strconv.Itoa(bestRect.X),
+			"input_box_y":      strconv.Itoa(bestRect.Y),
+			"input_box_width":  strconv.Itoa(bestRect.Width),
+			"input_box_height": strconv.Itoa(bestRect.Height),
+			"detection_score":  strconv.Itoa(bestScore),
+		}
+		if debugImagePath != "" {
+			context["debug_image_path"] = debugImagePath
+		}
+
 		return bestRect, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
@@ -1657,20 +1761,32 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 					Timestamp: time.Now(),
 					Level:     "info",
 					Message:   "Input box detected with visual analysis",
-					Context: map[string]string{
-						"detection_method": "visual_analysis",
-						"input_box_x":      strconv.Itoa(bestRect.X),
-						"input_box_y":      strconv.Itoa(bestRect.Y),
-						"input_box_width":  strconv.Itoa(bestRect.Width),
-						"input_box_height": strconv.Itoa(bestRect.Height),
-						"detection_score":  strconv.Itoa(bestScore),
-					},
+					Context:   context,
 				},
 			},
 		}
 	}
 
 	// 否则返回几何推测值
+	// 生成调试图像（即使回退也生成，用于验证几何推测值）
+	debugImagePath := ""
+	if img != nil {
+		if path, err := saveInputBoxDebugImage(img, defaultRect, leftSidebarRect, windowWidth, windowHeight); err == nil {
+			debugImagePath = path
+		}
+	}
+
+	context := map[string]string{
+		"estimation_method": "geometric_fallback",
+		"input_box_x":       strconv.Itoa(defaultRect.X),
+		"input_box_y":       strconv.Itoa(defaultRect.Y),
+		"input_box_width":   strconv.Itoa(defaultRect.Width),
+		"input_box_height":  strconv.Itoa(defaultRect.Height),
+	}
+	if debugImagePath != "" {
+		context["debug_image_path"] = debugImagePath
+	}
+
 	return defaultRect, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
@@ -1679,25 +1795,42 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 				Timestamp: time.Now(),
 				Level:     "info",
 				Message:   "Input box detection fell back to geometric estimation",
-				Context: map[string]string{
-					"estimation_method": "geometric_fallback",
-					"input_box_x":       strconv.Itoa(defaultRect.X),
-					"input_box_y":       strconv.Itoa(defaultRect.Y),
-					"input_box_width":   strconv.Itoa(defaultRect.Width),
-					"input_box_height":  strconv.Itoa(defaultRect.Height),
-				},
+				Context:   context,
 			},
 		},
 	}
 }
 
 // GetInputBoxClickPoint 获取输入框点击坐标
-// 优先点击输入框中部偏左位置，避免点到表情/附件按钮
-func (b *Bridge) GetInputBoxClickPoint(inputBox InputBoxRect) (x, y int, clickSource string) {
-	// 点击输入框左侧1/3处，垂直居中
-	x = inputBox.X + inputBox.Width/3
-	y = inputBox.Y + inputBox.Height/2
-	return x, y, "input_box_left_third"
+// 支持多种点击策略
+func (b *Bridge) GetInputBoxClickPoint(inputBox InputBoxRect, strategy string) (x, y int, clickSource string) {
+	// 如果未指定策略，使用默认策略
+	if strategy == "" {
+		strategy = "input_left_third"
+	}
+
+	switch strategy {
+	case "input_center":
+		// 点击输入框中心
+		x = inputBox.X + inputBox.Width/2
+		y = inputBox.Y + inputBox.Height/2
+		return x, y, "input_box_center"
+	case "input_left_quarter":
+		// 点击输入框左侧1/4处
+		x = inputBox.X + inputBox.Width/4
+		y = inputBox.Y + inputBox.Height/2
+		return x, y, "input_box_left_quarter"
+	case "input_double_click_center":
+		// 双击输入框中心（调用者需执行双击）
+		x = inputBox.X + inputBox.Width/2
+		y = inputBox.Y + inputBox.Height/2
+		return x, y, "input_box_double_click_center"
+	default:
+		// 默认策略：input_left_third
+		x = inputBox.X + inputBox.Width/3
+		y = inputBox.Y + inputBox.Height/2
+		return x, y, "input_box_left_third"
+	}
 }
 
 // computeRectAverageBrightness 计算矩形区域平均亮度

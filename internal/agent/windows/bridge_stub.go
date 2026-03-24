@@ -145,6 +145,11 @@ func (b *Bridge) GetClipboardText() (string, adapter.Result) {
 	}
 }
 
+// GetInputBoxClickPoint 获取输入框点击坐标（非 Windows 平台返回不支持）
+func (b *Bridge) GetInputBoxClickPoint(inputBox InputBoxRect, strategy string) (x, y int, clickSource string) {
+	return 0, 0, "platform_not_supported"
+}
+
 // Release 释放资源（非 Windows 平台无操作）
 func (b *Bridge) Release() {}
 

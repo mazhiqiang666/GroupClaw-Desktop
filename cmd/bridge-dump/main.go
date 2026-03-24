@@ -220,6 +220,26 @@ func main() {
 			}
 		}
 		focusVision(bridge, uintptr(handle), index, strategy, waitMs)
+	case "debug-input-box":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-input-box <window-handle>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		debugInputBox(bridge, uintptr(handle))
+	case "click-input-box":
+		if len(args) < 3 {
+			log.Fatal("Usage: bridge-dump click-input-box <window-handle> <strategy>")
+			log.Fatal("Strategies: input_left_third, input_center, input_left_quarter, input_double_click_center")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		strategy := args[2]
+		clickInputBox(bridge, uintptr(handle), strategy)
 	default:
 		printUsage()
 	}
@@ -244,6 +264,9 @@ func printUsage() {
 	fmt.Println("                                         Use --split-regions for region-based OCR")
 	fmt.Println("  bridge-dump debug-vision <handle>     - Debug: Visual conversation detection")
 	fmt.Println("  bridge-dump click-conversation <h> <i> - Click conversation by vision detection index")
+	fmt.Println("  bridge-dump debug-input-box <handle>   - Debug: Input box detection")
+	fmt.Println("  bridge-dump click-input-box <h> <strategy> - Click input box with specified strategy")
+	fmt.Println("                                         Strategies: input_left_third, input_center, input_left_quarter, input_double_click_center")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
@@ -1963,4 +1986,156 @@ func abs(x int) int {
 	}
 	return x
 }
+
+// debugInputBox 调试输入框检测
+func debugInputBox(bridge windows.BridgeInterface, handle uintptr) {
+	fmt.Printf("=== Debug: Input Box Detection for Handle: 0x%X (%d) ===\n\n", handle, handle)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+	fmt.Printf("Window Info: Handle=0x%X, Class=%s, Title=%s\n\n", info.Handle, info.Class, info.Title)
+
+	// 检测会话列表（获取左侧边栏矩形）
+	visionResult, visionDetectResult := bridge.DetectConversations(handle)
+	if visionDetectResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to detect conversations: %s\n", visionDetectResult.Error)
+		return
+	}
+
+	fmt.Printf("Vision Detection Results:\n")
+	fmt.Printf("  Window Size: %dx%d\n", visionResult.WindowWidth, visionResult.WindowHeight)
+	fmt.Printf("  Left Sidebar Rect: [%d,%d,%d,%d]\n",
+		visionResult.LeftSidebarRect[0], visionResult.LeftSidebarRect[1],
+		visionResult.LeftSidebarRect[2], visionResult.LeftSidebarRect[3])
+	fmt.Printf("  Conversation Rects: %d\n", len(visionResult.ConversationRects))
+	if visionResult.DebugImagePath != "" {
+		fmt.Printf("  Debug Image: %s\n", visionResult.DebugImagePath)
+	}
+	fmt.Println()
+
+	// 检测输入框区域
+	inputBoxRect, inputBoxResult := bridge.DetectInputBoxArea(
+		handle,
+		visionResult.LeftSidebarRect,
+		visionResult.WindowWidth,
+		visionResult.WindowHeight,
+	)
+
+	fmt.Printf("Input Box Detection Results:\n")
+	fmt.Printf("  Input Box Rect: X=%d, Y=%d, Width=%d, Height=%d\n",
+		inputBoxRect.X, inputBoxRect.Y, inputBoxRect.Width, inputBoxRect.Height)
+
+	// 输出诊断信息
+	for _, diag := range inputBoxResult.Diagnostics {
+		fmt.Printf("  Detection Method: %s\n", diag.Context["detection_method"])
+		fmt.Printf("  Detection Score: %s\n", diag.Context["detection_score"])
+		if debugPath := diag.Context["debug_image_path"]; debugPath != "" {
+			fmt.Printf("  Debug Image: %s\n", debugPath)
+		}
+	}
+
+	// 计算不同策略的点击坐标
+	fmt.Printf("\nClick Points by Strategy:\n")
+	strategies := []string{"input_left_third", "input_center", "input_left_quarter", "input_double_click_center"}
+	for _, strategy := range strategies {
+		clickX, clickY, clickSource := bridge.GetInputBoxClickPoint(inputBoxRect, strategy)
+		fmt.Printf("  %-25s: (%d, %d) [%s]\n", strategy, clickX, clickY, clickSource)
+	}
+
+	fmt.Println("\n=== Input Box Debug Complete ===")
+}
+
+// clickInputBox 点击输入框并验证
+func clickInputBox(bridge windows.BridgeInterface, handle uintptr, strategy string) {
+	fmt.Printf("=== Click Input Box: Handle=0x%X, Strategy=%s ===\n\n", handle, strategy)
+
+	// 检测会话列表
+	visionResult, visionDetectResult := bridge.DetectConversations(handle)
+	if visionDetectResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to detect conversations: %s\n", visionDetectResult.Error)
+		return
+	}
+
+	// 检测输入框区域
+	inputBoxRect, inputBoxResult := bridge.DetectInputBoxArea(
+		handle,
+		visionResult.LeftSidebarRect,
+		visionResult.WindowWidth,
+		visionResult.WindowHeight,
+	)
+
+	fmt.Printf("Input Box: X=%d, Y=%d, Width=%d, Height=%d\n",
+		inputBoxRect.X, inputBoxRect.Y, inputBoxRect.Width, inputBoxRect.Height)
+
+	// 输出检测方法信息
+	if len(inputBoxResult.Diagnostics) > 0 {
+		for _, diag := range inputBoxResult.Diagnostics {
+			if method := diag.Context["detection_method"]; method != "" {
+				fmt.Printf("Detection Method: %s\n", method)
+			}
+			if score := diag.Context["detection_score"]; score != "" {
+				fmt.Printf("Detection Score: %s\n", score)
+			}
+			if debugPath := diag.Context["debug_image_path"]; debugPath != "" {
+				fmt.Printf("Debug Image: %s\n", debugPath)
+			}
+		}
+	}
+
+	// 计算点击坐标
+	clickX, clickY, clickSource := bridge.GetInputBoxClickPoint(inputBoxRect, strategy)
+	fmt.Printf("Click Point: (%d, %d) [%s]\n", clickX, clickY, clickSource)
+
+	// 捕获点击前截图
+	fmt.Printf("Capturing before-click screenshot...\n")
+	beforeScreenshot, captureResult := bridge.CaptureWindow(handle)
+	if captureResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to capture before screenshot: %s\n", captureResult.Error)
+		return
+	}
+
+	// 点击输入框
+	fmt.Printf("Clicking input box...\n")
+	clickResult := bridge.Click(handle, clickX, clickY)
+	if clickResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Click failed: %s\n", clickResult.Error)
+		return
+	}
+	fmt.Printf("Click successful\n")
+
+	// 等待点击生效
+	time.Sleep(200 * time.Millisecond)
+
+	// 捕获点击后截图
+	fmt.Printf("Capturing after-click screenshot...\n")
+	afterScreenshot, captureResult := bridge.CaptureWindow(handle)
+	if captureResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to capture after screenshot: %s\n", captureResult.Error)
+		return
+	}
+
+	// 计算输入框区域差异
+	if len(beforeScreenshot) > 0 && len(afterScreenshot) > 0 {
+		diff := windows.CalculateRectDiffPercent(
+			beforeScreenshot, afterScreenshot,
+			visionResult.WindowWidth, visionResult.WindowHeight,
+			inputBoxRect,
+		)
+		fmt.Printf("Input Box Diff After Click: %.3f\n", diff)
+		if diff > 0 {
+			fmt.Printf("✓ Input box activated (diff > 0)\n")
+		} else {
+			fmt.Printf("✗ Input box NOT activated (diff = 0)\n")
+		}
+	} else {
+		fmt.Printf("Cannot calculate diff: screenshots empty\n")
+	}
+
+	fmt.Println("\n=== Click Input Box Complete ===")
+}
+
 

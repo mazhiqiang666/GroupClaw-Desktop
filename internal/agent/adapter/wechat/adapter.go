@@ -838,6 +838,7 @@ func (a *WeChatAdapter) Read(conv protocol.ConversationRef, limit int) ([]protoc
 	}
 }
 
+
 // Send 发送消息
 func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, taskID string) adapter.Result {
 	startTime := time.Now()
@@ -883,6 +884,12 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		}
 	}
 
+	// 检查是否为输入框调试模式
+	isInputBoxDebugMode := false
+	if strings.Contains(taskID, "debug_input") || strings.Contains(taskID, "test_input") {
+		isInputBoxDebugMode = true
+	}
+
 	// 如果Focus置信度过低（<0.5），可以决定降级处理
 	focusConfidenceFloat := 0.0
 	if conf, err := strconv.ParseFloat(focusConfidence, 64); err == nil {
@@ -899,6 +906,7 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	var inputBoxRect windows.InputBoxRect
 	windowWidth := 0
 	windowHeight := 0
+	inputBoxDiffAfterClick := 0.0  // 输入框点击后差异百分比
 
 	// 截图变量用于增强验证
 	var beforeClickScreenshot []byte    // 输入框点击前截图
@@ -927,36 +935,130 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 			// 1. 捕获输入框点击前截图
 			beforeClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
 
-			// 获取输入框点击坐标
-			clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(inputBoxRect)
-			// 点击输入框（尝试多次点击以提高可靠性）
-			maxClickAttempts := 2
+			// 定义输入框点击策略列表（按优先级排序）
+			strategies := []string{"input_left_third", "input_center", "input_left_quarter", "input_double_click_center"}
+			selectedStrategy := ""
+			selectedClickX := 0
+			selectedClickY := 0
+			selectedClickSource := ""
 			localClickAttempts := 0
 			localClickSuccess := false
-			localInputClickSource := clickSource
+			// 使用外部定义的 inputBoxDiffAfterClick 变量
 
-			for attempt := 1; attempt <= maxClickAttempts && !localClickSuccess; attempt++ {
-				clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
-				if clickResult.Status == adapter.StatusSuccess {
-					localClickSuccess = true
-					localClickAttempts = attempt
-					inputBoxClicked = true
-					inputClickX = clickX
-					inputClickY = clickY
-					localInputClickSource = clickSource + fmt.Sprintf("_attempt_%d", attempt)
-					// 等待点击生效（增加等待时间以提高可靠性）
-					time.Sleep(200 * time.Millisecond)
-					// 捕获输入框点击后截图
-					afterClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
-				} else if attempt < maxClickAttempts {
-					// 等待一段时间后重试
-					time.Sleep(100 * time.Millisecond)
+			// 遍历策略，直到找到能激活输入框的策略
+			for _, strategy := range strategies {
+				// 计算该策略的点击坐标
+				clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(inputBoxRect, strategy)
+				maxClickAttempts := 2
+				strategySuccess := false
+				strategyAttempts := 0
+				var strategyAfterClickScreenshot []byte
+
+				for attempt := 1; attempt <= maxClickAttempts && !strategySuccess; attempt++ {
+					clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+					if clickResult.Status == adapter.StatusSuccess {
+						strategySuccess = true
+						strategyAttempts = attempt
+						// 等待点击生效
+						time.Sleep(200 * time.Millisecond)
+						// 捕获点击后截图
+						strategyAfterClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+					} else if attempt < maxClickAttempts {
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+
+				if strategySuccess && strategyAfterClickScreenshot != nil && beforeClickScreenshot != nil {
+					// 计算输入框区域差异
+					diff := windows.CalculateRectDiffPercent(beforeClickScreenshot, strategyAfterClickScreenshot, windowWidth, windowHeight, inputBoxRect)
+					inputBoxDiffAfterClick = diff
+					// 如果差异大于0，认为输入框被激活
+					if diff > 0 {
+						selectedStrategy = strategy
+						selectedClickX = clickX
+						selectedClickY = clickY
+						selectedClickSource = clickSource
+						localClickAttempts = strategyAttempts
+						localClickSuccess = true
+						afterClickScreenshot = strategyAfterClickScreenshot
+						break // 找到有效策略，退出循环
+					}
+					// 如果差异为0，继续尝试下一个策略
 				}
 			}
 
-			inputClickSource = localInputClickSource
+			// 如果没有策略成功激活输入框，回退到第一个策略
+			if !localClickSuccess && len(strategies) > 0 {
+				fallbackStrategy := strategies[0]
+				clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(inputBoxRect, fallbackStrategy)
+				// 尝试点击
+				maxClickAttempts := 2
+				for attempt := 1; attempt <= maxClickAttempts && !localClickSuccess; attempt++ {
+					clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+					if clickResult.Status == adapter.StatusSuccess {
+						localClickSuccess = true
+						localClickAttempts = attempt
+						selectedStrategy = fallbackStrategy
+						selectedClickX = clickX
+						selectedClickY = clickY
+						selectedClickSource = clickSource
+						time.Sleep(200 * time.Millisecond)
+						afterClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+						// 计算回退策略的差异
+						if afterClickScreenshot != nil && beforeClickScreenshot != nil {
+							diff := windows.CalculateRectDiffPercent(beforeClickScreenshot, afterClickScreenshot, windowWidth, windowHeight, inputBoxRect)
+							inputBoxDiffAfterClick = diff
+						}
+					} else if attempt < maxClickAttempts {
+						time.Sleep(100 * time.Millisecond)
+					}
+				}
+			}
+
+			// 设置输出变量
+			inputBoxClicked = localClickSuccess
+			inputClickX = selectedClickX
+			inputClickY = selectedClickY
+			inputClickSource = selectedClickSource
+			if selectedStrategy != "" {
+				inputClickSource = selectedClickSource + "_strategy_" + selectedStrategy
+			}
 			inputBoxClickAttempts = localClickAttempts
 			inputBoxClickSuccess = localClickSuccess
+		}
+	}
+
+	// 输入框调试模式：如果taskID包含debug_input或test_input，则只进行输入框点击测试
+	if isInputBoxDebugMode {
+		// 返回输入框点击测试结果，不执行后续发送流程
+		return adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "info",
+					Message:   "Input box click test completed",
+					Context: map[string]string{
+						"input_box_clicked":           strconv.FormatBool(inputBoxClicked),
+						"input_click_x":               strconv.Itoa(inputClickX),
+						"input_click_y":               strconv.Itoa(inputClickY),
+						"input_click_source":          inputClickSource,
+						"input_box_click_attempts":    strconv.Itoa(inputBoxClickAttempts),
+						"input_box_click_success":     strconv.FormatBool(inputBoxClickSuccess),
+						"input_box_x":                 strconv.Itoa(inputBoxRect.X),
+						"input_box_y":                 strconv.Itoa(inputBoxRect.Y),
+						"input_box_width":             strconv.Itoa(inputBoxRect.Width),
+						"input_box_height":            strconv.Itoa(inputBoxRect.Height),
+						"input_box_diff_after_click":  fmt.Sprintf("%.3f", inputBoxDiffAfterClick),
+						"window_width":                strconv.Itoa(windowWidth),
+						"window_height":               strconv.Itoa(windowHeight),
+						"debug_mode":                  "input_box_click_test",
+						"message_skipped":             "true",
+					},
+				},
+			},
 		}
 	}
 
@@ -1114,6 +1216,8 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	diagnostics["input_box_y"] = strconv.Itoa(inputBoxRect.Y)
 	diagnostics["input_box_width"] = strconv.Itoa(inputBoxRect.Width)
 	diagnostics["input_box_height"] = strconv.Itoa(inputBoxRect.Height)
+	// 添加输入框点击后差异信息
+	diagnostics["input_box_diff_after_click_debug"] = fmt.Sprintf("%.3f", inputBoxDiffAfterClick)
 	diagnostics["paste_executed"] = "true"  // 当前流程中必定执行粘贴
 	diagnostics["enter_executed"] = "true"   // 当前流程中必定执行发送
 

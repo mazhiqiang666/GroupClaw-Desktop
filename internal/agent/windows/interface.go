@@ -73,7 +73,9 @@ type BridgeInterface interface {
 	DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) (InputBoxRect, adapter.Result)
 
 	// GetInputBoxClickPoint 获取输入框点击坐标
-	GetInputBoxClickPoint(inputBox InputBoxRect) (x, y int, clickSource string)
+	// strategy: 点击策略 (input_left_third, input_center, input_left_quarter, input_double_click_center)
+	// 如果为空，默认为 input_left_third
+	GetInputBoxClickPoint(inputBox InputBoxRect, strategy string) (x, y int, clickSource string)
 }
 
 // AccessibleNode 可访问节点信息
