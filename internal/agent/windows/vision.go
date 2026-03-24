@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -45,6 +46,13 @@ type ConversationRect struct {
 	AvatarRect    [4]int `json:"avatar_rect,omitempty"`   // x, y, width, height
 	TextRect      [4]int `json:"text_rect,omitempty"`     // x, y, width, height
 	UnreadDotRect [4]int `json:"unread_dot_rect,omitempty"` // x, y, width, height
+}
+
+// candidateScore 输入框候选评分结构（内部使用）
+type candidateScore struct {
+	rect     InputBoxRect
+	score    int
+	features map[string]string
 }
 
 // bgrToRGBA 将BGR像素数据转换为RGBA图像
@@ -312,6 +320,112 @@ func saveInputBoxDebugImage(img *image.RGBA, inputBoxRect InputBoxRect, leftSide
 	// 保存PNG文件
 	timestamp := time.Now().UnixNano()
 	filename := fmt.Sprintf("inputbox_debug_%d.png", timestamp)
+	filepath := filepath.Join(debugDir, filename)
+
+	file, err := os.Create(filepath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create debug image file: %v", err)
+	}
+	defer file.Close()
+
+	if err := png.Encode(file, annotated); err != nil {
+		return "", fmt.Errorf("failed to encode PNG: %v", err)
+	}
+
+	return filepath, nil
+}
+
+// saveInputBoxCandidatesDebugImage 保存输入框候选调试图像
+func saveInputBoxCandidatesDebugImage(img *image.RGBA, candidates []candidateScore, leftSidebarRect [4]int, windowWidth, windowHeight int) (string, error) {
+	// 创建调试目录
+	debugDir := filepath.Join(os.TempDir(), "wechat_inputbox_debug")
+	if err := os.MkdirAll(debugDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create debug directory: %v", err)
+	}
+
+	// 创建带标注的图像
+	annotated := image.NewRGBA(img.Bounds())
+	draw.Draw(annotated, img.Bounds(), img, image.Point{}, draw.Src)
+
+	// 绘制左侧边栏区域（如果有效）
+	if leftSidebarRect[2] > 0 && leftSidebarRect[3] > 0 {
+		sidebarRect := image.Rect(
+			leftSidebarRect[0],
+			leftSidebarRect[1],
+			leftSidebarRect[0]+leftSidebarRect[2],
+			leftSidebarRect[1]+leftSidebarRect[3],
+		)
+		drawSidebarRect(annotated, sidebarRect)
+	}
+
+	// 为每个候选区域绘制不同颜色的矩形
+	colors := []color.RGBA{
+		{R: 255, G: 0, B: 0, A: 200},     // 红色 - 候选0
+		{R: 0, G: 255, B: 0, A: 200},     // 绿色 - 候选1
+		{R: 0, G: 0, B: 255, A: 200},     // 蓝色 - 候选2
+		{R: 255, G: 255, B: 0, A: 200},   // 黄色 - 候选3
+		{R: 255, G: 0, B: 255, A: 200},   // 紫色 - 候选4
+	}
+
+	for i, c := range candidates {
+		if c.rect.Width > 0 && c.rect.Height > 0 {
+			inputRect := image.Rect(
+				c.rect.X,
+				c.rect.Y,
+				c.rect.X+c.rect.Width,
+				c.rect.Y+c.rect.Height,
+			)
+
+			// 使用不同颜色绘制矩形
+			colorIndex := i % len(colors)
+			rectColor := colors[colorIndex]
+
+			// 绘制矩形边框（3像素宽）
+			for x := inputRect.Min.X; x < inputRect.Max.X; x++ {
+				for y := inputRect.Min.Y; y < inputRect.Min.Y+3; y++ { // 上边框
+					if y < annotated.Bounds().Max.Y {
+						annotated.SetRGBA(x, y, rectColor)
+					}
+				}
+				for y := inputRect.Max.Y - 3; y < inputRect.Max.Y; y++ { // 下边框
+					if y < annotated.Bounds().Max.Y {
+						annotated.SetRGBA(x, y, rectColor)
+					}
+				}
+			}
+			for y := inputRect.Min.Y; y < inputRect.Max.Y; y++ {
+				for x := inputRect.Min.X; x < inputRect.Min.X+3; x++ { // 左边框
+					if x < annotated.Bounds().Max.X {
+						annotated.SetRGBA(x, y, rectColor)
+					}
+				}
+				for x := inputRect.Max.X - 3; x < inputRect.Max.X; x++ { // 右边框
+					if x < annotated.Bounds().Max.X {
+						annotated.SetRGBA(x, y, rectColor)
+					}
+				}
+			}
+
+			// 在矩形左上角绘制彩色条表示索引
+			barWidth := 20
+			barHeight := 10
+			barX := inputRect.Min.X
+			barY := inputRect.Min.Y - barHeight
+			if barY < 0 {
+				barY = inputRect.Min.Y
+			}
+
+			for x := barX; x < barX+barWidth && x < annotated.Bounds().Max.X; x++ {
+				for y := barY; y < barY+barHeight && y < annotated.Bounds().Max.Y; y++ {
+					annotated.SetRGBA(x, y, rectColor)
+				}
+			}
+		}
+	}
+
+	// 保存PNG文件
+	timestamp := time.Now().UnixNano()
+	filename := fmt.Sprintf("inputbox_candidates_%d.png", timestamp)
 	filepath := filepath.Join(debugDir, filename)
 
 	file, err := os.Create(filepath)
@@ -1621,9 +1735,9 @@ func (b *Bridge) FocusConversationByVision(windowHandle uintptr, strategy string
 }
 
 
-// DetectInputBoxArea 检测输入框区域
-// 基于窗口尺寸和左侧边栏矩形几何定位输入框
-func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) (InputBoxRect, adapter.Result) {
+// DetectInputBoxArea 检测输入框区域（返回多候选）
+// 基于窗口尺寸和左侧边栏矩形几何定位输入框，返回多个候选区域
+func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) ([]InputBoxCandidate, adapter.Result) {
 	// 默认值：如果检测失败，返回基于几何推测的矩形
 	defaultRect := InputBoxRect{
 		X:      leftSidebarRect[0] + leftSidebarRect[2] + 20, // 左侧边栏右侧 + 边距
@@ -1636,7 +1750,14 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 	pixels, captureResult := b.CaptureWindow(windowHandle)
 	if captureResult.Status != adapter.StatusSuccess {
 		// 截图失败，返回几何推测值
-		return defaultRect, adapter.Result{
+		candidate := InputBoxCandidate{
+			Index:    0,
+			Rect:     defaultRect,
+			Source:   "geometric_fallback",
+			Score:    50,
+			Features: map[string]string{"reason": "screenshot_failed"},
+		}
+		return []InputBoxCandidate{candidate}, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 			Diagnostics: []adapter.Diagnostic{
@@ -1646,10 +1767,7 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 					Message:   "Input box detection fell back to geometric estimation (screenshot failed)",
 					Context: map[string]string{
 						"estimation_method": "geometric_fallback",
-						"input_box_x":       strconv.Itoa(defaultRect.X),
-						"input_box_y":       strconv.Itoa(defaultRect.Y),
-						"input_box_width":   strconv.Itoa(defaultRect.Width),
-						"input_box_height":  strconv.Itoa(defaultRect.Height),
+						"candidate_count":   "1",
 					},
 				},
 			},
@@ -1661,7 +1779,14 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 	img, err := bgrToRGBA(pixels, windowWidth, windowHeight, rowSize)
 	if err != nil {
 		// 转换失败，返回几何推测值
-		return defaultRect, adapter.Result{
+		candidate := InputBoxCandidate{
+			Index:    0,
+			Rect:     defaultRect,
+			Source:   "geometric_fallback",
+			Score:    50,
+			Features: map[string]string{"reason": "image_conversion_failed"},
+		}
+		return []InputBoxCandidate{candidate}, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 			Diagnostics: []adapter.Diagnostic{
@@ -1671,10 +1796,7 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 					Message:   "Input box detection fell back to geometric estimation (image conversion failed)",
 					Context: map[string]string{
 						"estimation_method": "geometric_fallback",
-						"input_box_x":       strconv.Itoa(defaultRect.X),
-						"input_box_y":       strconv.Itoa(defaultRect.Y),
-						"input_box_width":   strconv.Itoa(defaultRect.Width),
-						"input_box_height":  strconv.Itoa(defaultRect.Height),
+						"candidate_count":   "1",
 					},
 				},
 			},
@@ -1689,15 +1811,21 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 
 	if rightAreaWidth <= 0 || bottomAreaStartY < 0 {
 		// 区域无效，返回几何推测值
-		return defaultRect, adapter.Result{
+		candidate := InputBoxCandidate{
+			Index:    0,
+			Rect:     defaultRect,
+			Source:   "geometric_fallback",
+			Score:    50,
+			Features: map[string]string{"reason": "invalid_search_area"},
+		}
+		return []InputBoxCandidate{candidate}, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
 		}
 	}
 
-	// 搜索可能的输入框（简单亮度分析）
-	bestRect := defaultRect
-	bestScore := 0
+	// 收集所有可能的候选区域
+	var candidates []candidateScore
 
 	// 扫描可能的输入框位置和尺寸
 	for y := bottomAreaStartY; y < windowHeight-40; y += 10 {
@@ -1718,83 +1846,92 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 
 				score := brightness + edgeDensity*2
 
-				if score > bestScore {
-					bestScore = score
-					bestRect = InputBoxRect{
+				// 记录候选区域
+				features := map[string]string{
+					"brightness":   strconv.Itoa(brightness),
+					"edge_density": strconv.Itoa(edgeDensity),
+					"width":        strconv.Itoa(width),
+					"height":       strconv.Itoa(height),
+				}
+				candidates = append(candidates, candidateScore{
+					rect: InputBoxRect{
 						X:      x,
 						Y:      y,
 						Width:  width,
 						Height: height,
-					}
-				}
+					},
+					score:    score,
+					features: features,
+				})
 			}
 		}
 	}
 
-	// 如果找到合理区域，返回检测结果
-	if bestScore > 50 {
-		// 生成调试图像
-		debugImagePath := ""
-		if img != nil {
-			if path, err := saveInputBoxDebugImage(img, bestRect, leftSidebarRect, windowWidth, windowHeight); err == nil {
-				debugImagePath = path
-			}
-		}
+	// 按评分排序
+	sort.Slice(candidates, func(i, j int) bool {
+		return candidates[i].score > candidates[j].score
+	})
 
-		context := map[string]string{
-			"detection_method": "visual_analysis",
-			"input_box_x":      strconv.Itoa(bestRect.X),
-			"input_box_y":      strconv.Itoa(bestRect.Y),
-			"input_box_width":  strconv.Itoa(bestRect.Width),
-			"input_box_height": strconv.Itoa(bestRect.Height),
-			"detection_score":  strconv.Itoa(bestScore),
-		}
-		if debugImagePath != "" {
-			context["debug_image_path"] = debugImagePath
-		}
+	// 选择前3-5个候选
+	maxCandidates := 5
+	if len(candidates) > maxCandidates {
+		candidates = candidates[:maxCandidates]
+	}
 
-		return bestRect, adapter.Result{
+	// 如果没有找到候选，返回几何推测值
+	if len(candidates) == 0 {
+		candidate := InputBoxCandidate{
+			Index:    0,
+			Rect:     defaultRect,
+			Source:   "geometric_fallback",
+			Score:    50,
+			Features: map[string]string{"reason": "no_candidates_found"},
+		}
+		return []InputBoxCandidate{candidate}, adapter.Result{
 			Status:     adapter.StatusSuccess,
 			ReasonCode: adapter.ReasonOK,
-			Diagnostics: []adapter.Diagnostic{
-				{
-					Timestamp: time.Now(),
-					Level:     "info",
-					Message:   "Input box detected with visual analysis",
-					Context:   context,
-				},
-			},
 		}
 	}
 
-	// 否则返回几何推测值
-	// 生成调试图像（即使回退也生成，用于验证几何推测值）
+	// 生成候选标注图
 	debugImagePath := ""
 	if img != nil {
-		if path, err := saveInputBoxDebugImage(img, defaultRect, leftSidebarRect, windowWidth, windowHeight); err == nil {
+		if path, err := saveInputBoxCandidatesDebugImage(img, candidates, leftSidebarRect, windowWidth, windowHeight); err == nil {
 			debugImagePath = path
 		}
 	}
 
+	// 构建返回的候选列表
+	var resultCandidates []InputBoxCandidate
+	for i, c := range candidates {
+		candidate := InputBoxCandidate{
+			Index:    i,
+			Rect:     c.rect,
+			Source:   "visual_analysis",
+			Score:    c.score,
+			Features: c.features,
+		}
+		resultCandidates = append(resultCandidates, candidate)
+	}
+
+	// 构建诊断信息
 	context := map[string]string{
-		"estimation_method": "geometric_fallback",
-		"input_box_x":       strconv.Itoa(defaultRect.X),
-		"input_box_y":       strconv.Itoa(defaultRect.Y),
-		"input_box_width":   strconv.Itoa(defaultRect.Width),
-		"input_box_height":  strconv.Itoa(defaultRect.Height),
+		"detection_method": "visual_analysis_multi_candidate",
+		"candidate_count":  strconv.Itoa(len(resultCandidates)),
+		"best_score":       strconv.Itoa(candidates[0].score),
 	}
 	if debugImagePath != "" {
 		context["debug_image_path"] = debugImagePath
 	}
 
-	return defaultRect, adapter.Result{
+	return resultCandidates, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
 		Diagnostics: []adapter.Diagnostic{
 			{
 				Timestamp: time.Now(),
 				Level:     "info",
-				Message:   "Input box detection fell back to geometric estimation",
+				Message:   "Input box candidates detected with visual analysis",
 				Context:   context,
 			},
 		},
@@ -2000,4 +2137,342 @@ func DetectFailureIndicator(screenshot []byte, windowWidth, windowHeight int, in
 
 	// 未检测到失败提示
 	return false, [4]int{}
+}
+
+// ProbeInputBoxCandidate 验证输入框候选激活状态
+func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBoxCandidate, strategy string) (InputBoxProbeResult, adapter.Result) {
+	startTime := time.Now()
+
+	// 获取窗口尺寸
+	rect, rectResult := b.getWindowRectInternal(windowHandle)
+	if rectResult.Status != adapter.StatusSuccess {
+		return InputBoxProbeResult{}, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("GET_WINDOW_RECT_FAILED"),
+			Error:      rectResult.Error,
+		}
+	}
+	windowWidth := int(rect.Right - rect.Left)
+	windowHeight := int(rect.Bottom - rect.Top)
+
+	// 捕获点击前截图
+	beforeScreenshot, captureResult := b.CaptureWindow(windowHandle)
+	if captureResult.Status != adapter.StatusSuccess {
+		return InputBoxProbeResult{}, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("CAPTURE_FAILED"),
+			Error:      captureResult.Error,
+		}
+	}
+
+	// 获取点击坐标
+	clickX, clickY, clickSource := b.GetInputBoxClickPoint(candidate.Rect, strategy)
+
+	// 点击候选区域
+	clickResult := b.Click(windowHandle, clickX, clickY)
+	if clickResult.Status != adapter.StatusSuccess {
+		return InputBoxProbeResult{}, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("CLICK_FAILED"),
+			Error:      clickResult.Error,
+		}
+	}
+
+	// 等待点击生效
+	time.Sleep(200 * time.Millisecond)
+
+	// 捕获点击后截图
+	afterScreenshot, captureResult := b.CaptureWindow(windowHandle)
+	if captureResult.Status != adapter.StatusSuccess {
+		return InputBoxProbeResult{}, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("CAPTURE_FAILED"),
+			Error:      captureResult.Error,
+		}
+	}
+
+	// 计算视觉变化差异
+	visualDiff := CalculateRectDiffPercent(beforeScreenshot, afterScreenshot, windowWidth, windowHeight, candidate.Rect)
+
+	// 收集激活信号
+	var activationSignals []string
+	activationScore := 0.0
+	editableConfidence := 0.0
+
+	// 信号1: 视觉变化
+	if visualDiff > 0 {
+		activationSignals = append(activationSignals, fmt.Sprintf("visual_change:%.3f", visualDiff))
+		activationScore += visualDiff * 100 // 视觉变化权重较高
+	}
+
+	// 信号2: 候选区域亮度变化（输入框激活后通常变亮）
+	beforeBrightness := computeRectAverageBrightness(
+		mustBGRToRGBA(beforeScreenshot, windowWidth, windowHeight),
+		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
+	)
+	afterBrightness := computeRectAverageBrightness(
+		mustBGRToRGBA(afterScreenshot, windowWidth, windowHeight),
+		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
+	)
+	brightnessDiff := afterBrightness - beforeBrightness
+	if brightnessDiff > 0 {
+		activationSignals = append(activationSignals, fmt.Sprintf("brightness_increase:%d", brightnessDiff))
+		activationScore += float64(brightnessDiff) * 0.5
+	}
+
+	// 信号3: 候选区域边缘密度变化（输入框激活后边框可能更明显）
+	beforeEdgeDensity := computeRectEdgeDensity(
+		mustBGRToRGBA(beforeScreenshot, windowWidth, windowHeight),
+		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
+	)
+	afterEdgeDensity := computeRectEdgeDensity(
+		mustBGRToRGBA(afterScreenshot, windowWidth, windowHeight),
+		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
+	)
+	edgeDiff := afterEdgeDensity - beforeEdgeDensity
+	if edgeDiff > 0 {
+		activationSignals = append(activationSignals, fmt.Sprintf("edge_increase:%d", edgeDiff))
+		activationScore += float64(edgeDiff) * 0.3
+	}
+
+	// 信号4: 候选区域位置稳定性（激活后位置应该稳定）
+	activationSignals = append(activationSignals, fmt.Sprintf("position_stable:%d,%d,%d,%d",
+		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height))
+
+	// 计算可编辑控件置信度（基于视觉特征）
+	editableConfidence = calculateEditableConfidence(candidate.Rect, beforeScreenshot, afterScreenshot, windowWidth, windowHeight)
+
+	// 生成调试图像
+	debugImagePath := ""
+	if len(beforeScreenshot) > 0 && len(afterScreenshot) > 0 {
+		if path, err := saveProbeDebugImage(beforeScreenshot, afterScreenshot, candidate.Rect, windowWidth, windowHeight, clickX, clickY); err == nil {
+			debugImagePath = path
+		}
+	}
+
+	// 构建结果
+	result := InputBoxProbeResult{
+		CandidateIndex:     candidate.Index,
+		ActivationScore:    activationScore,
+		ActivationSignals:  activationSignals,
+		EditableConfidence: editableConfidence,
+		RejectedReason:     "",
+		BeforeImage:        beforeScreenshot,
+		AfterImage:         afterScreenshot,
+		DebugImagePath:     debugImagePath,
+	}
+
+	// 如果激活分数太低，设置拒绝原因
+	if activationScore < 1.0 {
+		result.RejectedReason = "low_activation_score"
+	} else if visualDiff == 0 && brightnessDiff == 0 && edgeDiff == 0 {
+		result.RejectedReason = "no_visual_changes_detected"
+	}
+
+	// 计算处理时间
+	processingTime := time.Since(startTime)
+
+	return result, adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Input box candidate probe completed",
+				Context: map[string]string{
+					"candidate_index":     strconv.Itoa(candidate.Index),
+					"activation_score":    fmt.Sprintf("%.3f", result.ActivationScore),
+					"editable_confidence": fmt.Sprintf("%.3f", result.EditableConfidence),
+					"click_source":        clickSource,
+					"visual_diff":         fmt.Sprintf("%.3f", visualDiff),
+					"processing_time":     processingTime.String(),
+					"debug_image_path":    debugImagePath,
+				},
+			},
+		},
+	}
+}
+
+// mustBGRToRGBA 辅助函数，转换BGR数据为RGBA图像（不返回错误）
+func mustBGRToRGBA(bgrData []byte, width, height int) *image.RGBA {
+	rowSize := ((width*24 + 31) / 32) * 4
+	img, err := bgrToRGBA(bgrData, width, height, rowSize)
+	if err != nil {
+		// 返回空图像
+		return image.NewRGBA(image.Rect(0, 0, width, height))
+	}
+	return img
+}
+
+// calculateEditableConfidence 计算候选区域的可编辑控件置信度
+func calculateEditableConfidence(rect InputBoxRect, beforeImg, afterImg []byte, windowWidth, windowHeight int) float64 {
+	// 基于以下特征计算置信度：
+	// 1. 区域亮度适中（不太亮也不太暗）
+	// 2. 区域边缘密度适中
+	// 3. 区域尺寸符合输入框特征
+	// 4. 点击后有视觉变化
+
+	confidence := 0.0
+
+	// 转换图像
+	beforeRGBA := mustBGRToRGBA(beforeImg, windowWidth, windowHeight)
+
+	// 1. 亮度适中（输入框通常不是纯白也不是纯黑）
+	brightness := computeRectAverageBrightness(beforeRGBA, rect.X, rect.Y, rect.Width, rect.Height)
+	if brightness > 100 && brightness < 240 {
+		confidence += 0.3
+	}
+
+	// 2. 边缘密度适中（输入框通常有边框）
+	edgeDensity := computeRectEdgeDensity(beforeRGBA, rect.X, rect.Y, rect.Width, rect.Height)
+	if edgeDensity > 5 && edgeDensity < 50 {
+		confidence += 0.2
+	}
+
+	// 3. 尺寸符合输入框特征
+	if rect.Width > 100 && rect.Height > 40 && rect.Height < 150 {
+		confidence += 0.2
+	}
+
+	// 4. 点击后有视觉变化
+	visualDiff := CalculateRectDiffPercent(beforeImg, afterImg, windowWidth, windowHeight, rect)
+	if visualDiff > 0 {
+		confidence += 0.3
+	}
+
+	return minFloat(confidence, 1.0)
+}
+
+// minFloat 辅助函数
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// saveProbeDebugImage 保存probe调试图像
+func saveProbeDebugImage(beforeImg, afterImg []byte, rect InputBoxRect, windowWidth, windowHeight int, clickX, clickY int) (string, error) {
+	// 创建调试目录
+	debugDir := filepath.Join(os.TempDir(), "wechat_inputbox_debug")
+	if err := os.MkdirAll(debugDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create debug directory: %v", err)
+	}
+
+	// 转换图像
+	beforeRGBA := mustBGRToRGBA(beforeImg, windowWidth, windowHeight)
+	afterRGBA := mustBGRToRGBA(afterImg, windowWidth, windowHeight)
+
+	// 创建并排图像
+	combinedWidth := windowWidth * 2
+	combined := image.NewRGBA(image.Rect(0, 0, combinedWidth, windowHeight))
+
+	// 绘制before图像（左侧）
+	draw.Draw(combined, image.Rect(0, 0, windowWidth, windowHeight), beforeRGBA, image.Point{}, draw.Src)
+
+	// 绘制after图像（右侧）
+	draw.Draw(combined, image.Rect(windowWidth, 0, combinedWidth, windowHeight), afterRGBA, image.Point{}, draw.Src)
+
+	// 在before图像上绘制候选矩形（红色）
+	drawProbeRect(combined, rect, 0, 0)
+
+	// 在after图像上绘制候选矩形（绿色）
+	drawProbeRect(combined, rect, windowWidth, 0)
+
+	// 绘制点击点（黄色圆点）
+	drawClickPoint(combined, clickX, clickY, 0, 0) // before图像上的点击点
+	drawClickPoint(combined, clickX, clickY, windowWidth, 0) // after图像上的点击点
+
+	// 添加分隔线
+	for y := 0; y < windowHeight; y++ {
+		combined.SetRGBA(windowWidth-1, y, color.RGBA{R: 255, G: 255, B: 255, A: 255})
+	}
+
+	// 保存PNG文件
+	timestamp := time.Now().UnixNano()
+	filename := fmt.Sprintf("probe_debug_%d.png", timestamp)
+	filepath := filepath.Join(debugDir, filename)
+
+	file, err := os.Create(filepath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create debug image file: %v", err)
+	}
+	defer file.Close()
+
+	if err := png.Encode(file, combined); err != nil {
+		return "", fmt.Errorf("failed to encode PNG: %v", err)
+	}
+
+	return filepath, nil
+}
+
+// drawProbeRect 绘制probe调试矩形
+func drawProbeRect(img *image.RGBA, rect InputBoxRect, offsetX, offsetY int) {
+	if rect.Width <= 0 || rect.Height <= 0 {
+		return
+	}
+
+	// 红色边框表示before，绿色边框表示after
+	var rectColor color.RGBA
+	if offsetX == 0 {
+		rectColor = color.RGBA{R: 255, G: 0, B: 0, A: 200} // 红色
+	} else {
+		rectColor = color.RGBA{R: 0, G: 255, B: 0, A: 200} // 绿色
+	}
+
+	inputRect := image.Rect(
+		rect.X+offsetX,
+		rect.Y+offsetY,
+		rect.X+rect.Width+offsetX,
+		rect.Y+rect.Height+offsetY,
+	)
+
+	// 绘制矩形边框（3像素宽）
+	for x := inputRect.Min.X; x < inputRect.Max.X; x++ {
+		for y := inputRect.Min.Y; y < inputRect.Min.Y+3; y++ {
+			if y < img.Bounds().Max.Y {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+		for y := inputRect.Max.Y - 3; y < inputRect.Max.Y; y++ {
+			if y < img.Bounds().Max.Y {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+	}
+	for y := inputRect.Min.Y; y < inputRect.Max.Y; y++ {
+		for x := inputRect.Min.X; x < inputRect.Min.X+3; x++ {
+			if x < img.Bounds().Max.X {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+		for x := inputRect.Max.X - 3; x < inputRect.Max.X; x++ {
+			if x < img.Bounds().Max.X {
+				img.SetRGBA(x, y, rectColor)
+			}
+		}
+	}
+}
+
+// drawClickPoint 绘制点击点
+func drawClickPoint(img *image.RGBA, clickX, clickY, offsetX, offsetY int) {
+	x := clickX + offsetX
+	y := clickY + offsetY
+
+	// 绘制黄色圆点（5像素半径）
+	radius := 5
+	color := color.RGBA{R: 255, G: 255, B: 0, A: 255}
+
+	for dy := -radius; dy <= radius; dy++ {
+		for dx := -radius; dx <= radius; dx++ {
+			if dx*dx+dy*dy <= radius*radius {
+				pixelX := x + dx
+				pixelY := y + dy
+				if pixelX >= 0 && pixelX < img.Bounds().Max.X && pixelY >= 0 && pixelY < img.Bounds().Max.Y {
+					img.SetRGBA(pixelX, pixelY, color)
+				}
+			}
+		}
+	}
 }

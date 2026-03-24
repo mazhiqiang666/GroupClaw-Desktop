@@ -12,6 +12,31 @@ type InputBoxRect struct {
 	Height int `json:"height"`
 }
 
+// InputBoxCandidate 输入框候选区域
+type InputBoxCandidate struct {
+	Index        int               `json:"index"`        // 候选索引
+	Rect         InputBoxRect      `json:"rect"`         // 矩形区域
+	Source       string            `json:"source"`       // 来源：visual/geometric/ocr
+	Score        int               `json:"score"`        // 综合评分
+	Features     map[string]string `json:"features"`     // 特征描述
+	ActivationScore float64         `json:"activation_score"` // 激活评分
+	ActivationSignals []string      `json:"activation_signals"` // 激活信号
+	EditableConfidence float64      `json:"editable_confidence"` // 可编辑控件置信度
+	RejectedReason string           `json:"rejected_reason"`    // 拒绝原因
+}
+
+// InputBoxProbeResult 候选激活验证结果
+type InputBoxProbeResult struct {
+	CandidateIndex     int               `json:"candidate_index"`
+	ActivationScore    float64           `json:"activation_score"`
+	ActivationSignals  []string          `json:"activation_signals"`
+	EditableConfidence float64           `json:"editable_confidence"`
+	RejectedReason     string            `json:"rejected_reason"`
+	BeforeImage        []byte            `json:"-"` // 不序列化
+	AfterImage         []byte            `json:"-"` // 不序列化
+	DebugImagePath     string            `json:"debug_image_path"`
+}
+
 // BridgeInterface 定义 Windows UIA 桥接器接口
 // 为 WeChat adapter 提供最小可调用的 Windows 操作接口
 type BridgeInterface interface {
@@ -69,8 +94,11 @@ type BridgeInterface interface {
 	// DetectConversations 视觉检测会话列表
 	DetectConversations(windowHandle uintptr) (VisionDebugResult, adapter.Result)
 
-	// DetectInputBoxArea 检测输入框区域
-	DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) (InputBoxRect, adapter.Result)
+	// DetectInputBoxArea 检测输入框区域（返回多候选）
+	DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) ([]InputBoxCandidate, adapter.Result)
+
+	// ProbeInputBoxCandidate 验证输入框候选激活状态
+	ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBoxCandidate, strategy string) (InputBoxProbeResult, adapter.Result)
 
 	// GetInputBoxClickPoint 获取输入框点击坐标
 	// strategy: 点击策略 (input_left_third, input_center, input_left_quarter, input_double_click_center)

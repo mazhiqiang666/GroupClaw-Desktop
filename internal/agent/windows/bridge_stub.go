@@ -150,6 +150,22 @@ func (b *Bridge) GetInputBoxClickPoint(inputBox InputBoxRect, strategy string) (
 	return 0, 0, "platform_not_supported"
 }
 
+// DetectInputBoxArea 检测输入框区域（非 Windows 平台返回不支持）
+func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) ([]InputBoxCandidate, adapter.Result) {
+	return nil, adapter.Result{
+		Status:     adapter.StatusFailed,
+		ReasonCode: adapter.ReasonCode("PLATFORM_NOT_SUPPORTED"),
+	}
+}
+
+// ProbeInputBoxCandidate 验证输入框候选激活状态（非 Windows 平台返回不支持）
+func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBoxCandidate, strategy string) (InputBoxProbeResult, adapter.Result) {
+	return InputBoxProbeResult{}, adapter.Result{
+		Status:     adapter.StatusFailed,
+		ReasonCode: adapter.ReasonCode("PLATFORM_NOT_SUPPORTED"),
+	}
+}
+
 // Release 释放资源（非 Windows 平台无操作）
 func (b *Bridge) Release() {}
 

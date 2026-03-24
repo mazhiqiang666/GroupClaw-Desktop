@@ -240,6 +240,35 @@ func main() {
 		}
 		strategy := args[2]
 		clickInputBox(bridge, uintptr(handle), strategy)
+	case "debug-input-box-candidates":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-input-box-candidates <window-handle>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		debugInputBoxCandidates(bridge, uintptr(handle))
+	case "probe-input-box":
+		if len(args) < 3 {
+			log.Fatal("Usage: bridge-dump probe-input-box --candidate N <window-handle>")
+		}
+		// Parse --candidate flag
+		candidateIndex := 0
+		argIndex := 1
+		if args[1] == "--candidate" && len(args) >= 4 {
+			var err error
+			candidateIndex, err = strconv.Atoi(args[2])
+			if err != nil {
+				log.Fatalf("Invalid candidate index: %v", err)
+			}
+			argIndex = 3
+		}
+		handle, err := strconv.ParseUint(args[argIndex], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		probeInputBox(bridge, uintptr(handle), candidateIndex)
 	default:
 		printUsage()
 	}
@@ -265,6 +294,8 @@ func printUsage() {
 	fmt.Println("  bridge-dump debug-vision <handle>     - Debug: Visual conversation detection")
 	fmt.Println("  bridge-dump click-conversation <h> <i> - Click conversation by vision detection index")
 	fmt.Println("  bridge-dump debug-input-box <handle>   - Debug: Input box detection")
+	fmt.Println("  bridge-dump debug-input-box-candidates <handle> - Debug: Input box candidates with details")
+	fmt.Println("  bridge-dump probe-input-box --candidate N <handle> - Probe input box candidate activation")
 	fmt.Println("  bridge-dump click-input-box <h> <strategy> - Click input box with specified strategy")
 	fmt.Println("                                         Strategies: input_left_third, input_center, input_left_quarter, input_double_click_center")
 	fmt.Println("")
@@ -2017,17 +2048,25 @@ func debugInputBox(bridge windows.BridgeInterface, handle uintptr) {
 	}
 	fmt.Println()
 
-	// 检测输入框区域
-	inputBoxRect, inputBoxResult := bridge.DetectInputBoxArea(
+	// 检测输入框区域（多候选）
+	candidates, inputBoxResult := bridge.DetectInputBoxArea(
 		handle,
 		visionResult.LeftSidebarRect,
 		visionResult.WindowWidth,
 		visionResult.WindowHeight,
 	)
 
-	fmt.Printf("Input Box Detection Results:\n")
-	fmt.Printf("  Input Box Rect: X=%d, Y=%d, Width=%d, Height=%d\n",
-		inputBoxRect.X, inputBoxRect.Y, inputBoxRect.Width, inputBoxRect.Height)
+	fmt.Printf("Input Box Detection Results (Candidates: %d):\n", len(candidates))
+	for i, candidate := range candidates {
+		fmt.Printf("  Candidate %d:\n", i)
+		fmt.Printf("    Rect: X=%d, Y=%d, Width=%d, Height=%d\n",
+			candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height)
+		fmt.Printf("    Source: %s, Score: %d\n", candidate.Source, candidate.Score)
+		fmt.Printf("    Activation Score: %.2f\n", candidate.ActivationScore)
+		if candidate.RejectedReason != "" {
+			fmt.Printf("    Rejected: %s\n", candidate.RejectedReason)
+		}
+	}
 
 	// 输出诊断信息
 	for _, diag := range inputBoxResult.Diagnostics {
@@ -2038,12 +2077,14 @@ func debugInputBox(bridge windows.BridgeInterface, handle uintptr) {
 		}
 	}
 
-	// 计算不同策略的点击坐标
-	fmt.Printf("\nClick Points by Strategy:\n")
-	strategies := []string{"input_left_third", "input_center", "input_left_quarter", "input_double_click_center"}
-	for _, strategy := range strategies {
-		clickX, clickY, clickSource := bridge.GetInputBoxClickPoint(inputBoxRect, strategy)
-		fmt.Printf("  %-25s: (%d, %d) [%s]\n", strategy, clickX, clickY, clickSource)
+	// 计算不同策略的点击坐标（使用第一个候选）
+	if len(candidates) > 0 {
+		fmt.Printf("\nClick Points by Strategy (using first candidate):\n")
+		strategies := []string{"input_left_third", "input_center", "input_left_quarter", "input_double_click_center"}
+		for _, strategy := range strategies {
+			clickX, clickY, clickSource := bridge.GetInputBoxClickPoint(candidates[0].Rect, strategy)
+			fmt.Printf("  %-25s: (%d, %d) [%s]\n", strategy, clickX, clickY, clickSource)
+		}
 	}
 
 	fmt.Println("\n=== Input Box Debug Complete ===")
@@ -2060,15 +2101,23 @@ func clickInputBox(bridge windows.BridgeInterface, handle uintptr, strategy stri
 		return
 	}
 
-	// 检测输入框区域
-	inputBoxRect, inputBoxResult := bridge.DetectInputBoxArea(
+	// 检测输入框区域（多候选）
+	candidates, inputBoxResult := bridge.DetectInputBoxArea(
 		handle,
 		visionResult.LeftSidebarRect,
 		visionResult.WindowWidth,
 		visionResult.WindowHeight,
 	)
 
-	fmt.Printf("Input Box: X=%d, Y=%d, Width=%d, Height=%d\n",
+	if len(candidates) == 0 {
+		fmt.Println("No input box candidates found!")
+		return
+	}
+
+	// 使用第一个候选（或最高分的候选）
+	inputBoxRect := candidates[0].Rect
+	fmt.Printf("Using Candidate 0:\n")
+	fmt.Printf("  Input Box: X=%d, Y=%d, Width=%d, Height=%d\n",
 		inputBoxRect.X, inputBoxRect.Y, inputBoxRect.Width, inputBoxRect.Height)
 
 	// 输出检测方法信息
@@ -2136,6 +2185,153 @@ func clickInputBox(bridge windows.BridgeInterface, handle uintptr, strategy stri
 	}
 
 	fmt.Println("\n=== Click Input Box Complete ===")
+}
+
+// debugInputBoxCandidates 调试输入框候选区域检测
+func debugInputBoxCandidates(bridge windows.BridgeInterface, handle uintptr) {
+	fmt.Printf("=== Debug: Input Box Candidates for Handle: 0x%X (%d) ===\n\n", handle, handle)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+	fmt.Printf("Window Info: Handle=0x%X, Class=%s, Title=%s\n\n", info.Handle, info.Class, info.Title)
+
+	// 检测会话列表（获取左侧边栏矩形）
+	visionResult, visionDetectResult := bridge.DetectConversations(handle)
+	if visionDetectResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to detect conversations: %s\n", visionDetectResult.Error)
+		return
+	}
+
+	fmt.Printf("Vision Detection Results:\n")
+	fmt.Printf("  Window Size: %dx%d\n", visionResult.WindowWidth, visionResult.WindowHeight)
+	fmt.Printf("  Left Sidebar Rect: [%d,%d,%d,%d]\n",
+		visionResult.LeftSidebarRect[0], visionResult.LeftSidebarRect[1],
+		visionResult.LeftSidebarRect[2], visionResult.LeftSidebarRect[3])
+	fmt.Println()
+
+	// 检测输入框区域（多候选）
+	candidates, _ := bridge.DetectInputBoxArea(
+		handle,
+		visionResult.LeftSidebarRect,
+		visionResult.WindowWidth,
+		visionResult.WindowHeight,
+	)
+
+	fmt.Printf("Input Box Candidates Detected: %d\n\n", len(candidates))
+	if len(candidates) == 0 {
+		fmt.Println("No input box candidates found!")
+		return
+	}
+
+	// 输出每个候选的详细信息
+	for i, candidate := range candidates {
+		fmt.Printf("Candidate %d:\n", i)
+		fmt.Printf("  Index: %d\n", candidate.Index)
+		fmt.Printf("  Rect: X=%d, Y=%d, Width=%d, Height=%d\n",
+			candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height)
+		fmt.Printf("  Source: %s\n", candidate.Source)
+		fmt.Printf("  Score: %d\n", candidate.Score)
+		fmt.Printf("  Activation Score: %.2f\n", candidate.ActivationScore)
+		fmt.Printf("  Editable Confidence: %.2f\n", candidate.EditableConfidence)
+		if len(candidate.ActivationSignals) > 0 {
+			fmt.Printf("  Activation Signals: %v\n", candidate.ActivationSignals)
+		}
+		if len(candidate.Features) > 0 {
+			fmt.Printf("  Features: %v\n", candidate.Features)
+		}
+		if candidate.RejectedReason != "" {
+			fmt.Printf("  Rejected Reason: %s\n", candidate.RejectedReason)
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("\n=== Input Box Candidates Debug Complete ===")
+}
+
+// probeInputBox 验证输入框候选区域的激活状态
+func probeInputBox(bridge windows.BridgeInterface, handle uintptr, candidateIndex int) {
+	fmt.Printf("=== Probe Input Box Candidate: Handle=0x%X, Candidate=%d ===\n\n", handle, candidateIndex)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+	fmt.Printf("Window Info: Handle=0x%X, Class=%s, Title=%s\n\n", info.Handle, info.Class, info.Title)
+
+	// 检测会话列表（获取左侧边栏矩形）
+	visionResult, visionDetectResult := bridge.DetectConversations(handle)
+	if visionDetectResult.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to detect conversations: %s\n", visionDetectResult.Error)
+		return
+	}
+
+	fmt.Printf("Vision Detection Results:\n")
+	fmt.Printf("  Window Size: %dx%d\n", visionResult.WindowWidth, visionResult.WindowHeight)
+	fmt.Println()
+
+	// 检测输入框区域（多候选）
+	candidates, _ := bridge.DetectInputBoxArea(
+		handle,
+		visionResult.LeftSidebarRect,
+		visionResult.WindowWidth,
+		visionResult.WindowHeight,
+	)
+
+	if len(candidates) == 0 {
+		fmt.Println("No input box candidates found!")
+		return
+	}
+
+	if candidateIndex < 0 || candidateIndex >= len(candidates) {
+		fmt.Printf("Invalid candidate index: %d (valid range: 0-%d)\n", candidateIndex, len(candidates)-1)
+		return
+	}
+
+	candidate := candidates[candidateIndex]
+	fmt.Printf("Probing Candidate %d:\n", candidateIndex)
+	fmt.Printf("  Rect: X=%d, Y=%d, Width=%d, Height=%d\n",
+		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height)
+	fmt.Printf("  Source: %s, Score: %d\n", candidate.Source, candidate.Score)
+	fmt.Println()
+
+	// 测试不同点击策略
+	strategies := []string{"input_left_third", "input_center", "input_left_quarter", "input_double_click_center"}
+	for _, strategy := range strategies {
+		fmt.Printf("Testing strategy: %s\n", strategy)
+		probeResult, probeErr := bridge.ProbeInputBoxCandidate(handle, candidate, strategy)
+		if probeErr.Status != adapter.StatusSuccess {
+			fmt.Printf("  Probe failed: %s\n", probeErr.Error)
+			continue
+		}
+
+		fmt.Printf("  Activation Score: %.2f\n", probeResult.ActivationScore)
+		fmt.Printf("  Editable Confidence: %.2f\n", probeResult.EditableConfidence)
+		if len(probeResult.ActivationSignals) > 0 {
+			fmt.Printf("  Activation Signals: %v\n", probeResult.ActivationSignals)
+		}
+		if probeResult.RejectedReason != "" {
+			fmt.Printf("  Rejected Reason: %s\n", probeResult.RejectedReason)
+		}
+		if probeResult.DebugImagePath != "" {
+			fmt.Printf("  Debug Image: %s\n", probeResult.DebugImagePath)
+		}
+
+		// 判断激活状态
+		if probeResult.ActivationScore > 0.5 {
+			fmt.Printf("  ✓ Candidate ACTIVATED (score > 0.5)\n")
+		} else {
+			fmt.Printf("  ✗ Candidate NOT activated (score <= 0.5)\n")
+		}
+		fmt.Println()
+	}
+
+	fmt.Println("\n=== Probe Input Box Complete ===")
 }
 
 

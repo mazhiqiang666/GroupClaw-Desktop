@@ -923,13 +923,22 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 		windowHeight = visionResult.WindowHeight
 
 		// 检测输入框区域（使用视觉检测到的窗口尺寸）
-		detectedRect, inputBoxResult := a.bridge.DetectInputBoxArea(
+		candidates, inputBoxResult := a.bridge.DetectInputBoxArea(
 			conv.HostWindowHandle,
 			visionResult.LeftSidebarRect,
 			visionResult.WindowWidth,
 			visionResult.WindowHeight,
 		)
-		inputBoxRect = detectedRect
+		// Select the best candidate (highest activation score)
+		if len(candidates) > 0 {
+			bestCandidate := candidates[0]
+			for _, candidate := range candidates {
+				if candidate.ActivationScore > bestCandidate.ActivationScore {
+					bestCandidate = candidate
+				}
+			}
+			inputBoxRect = bestCandidate.Rect
+		}
 
 		if inputBoxResult.Status == adapter.StatusSuccess {
 			// 1. 捕获输入框点击前截图
