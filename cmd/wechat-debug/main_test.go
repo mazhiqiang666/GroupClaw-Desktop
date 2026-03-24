@@ -2,11 +2,64 @@ package main
 
 import (
 	"encoding/json"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
 )
+
+var testBinaryPath string
+
+// TestMain compiles the binary once before running all tests
+func TestMain(m *testing.M) {
+	// Create a temporary directory for the test binary
+	tmpDir, err := os.MkdirTemp("", "wechat-debug-test-*")
+	if err != nil {
+		panic("Failed to create temp dir: " + err.Error())
+	}
+	defer os.RemoveAll(tmpDir)
+
+	// Build the binary from the project root
+	testBinaryPath = filepath.Join(tmpDir, "wechat-debug.exe")
+
+	// Find project root by searching for go.mod
+	projectRoot := findProjectRoot()
+	if projectRoot == "" {
+		panic("Could not find project root (go.mod not found)")
+	}
+
+	buildCmd := exec.Command("go", "build", "-o", testBinaryPath, "./cmd/wechat-debug")
+	buildCmd.Dir = projectRoot
+	output, err := buildCmd.CombinedOutput()
+	if err != nil {
+		panic("Failed to build binary: " + err.Error() + "\nOutput: " + string(output))
+	}
+
+	// Run all tests
+	os.Exit(m.Run())
+}
+
+// findProjectRoot searches for go.mod in parent directories
+func findProjectRoot() string {
+	cwd, err := os.Getwd()
+	if err != nil {
+		return ""
+	}
+
+	// Search up to 10 levels for go.mod
+	for i := 0; i < 10; i++ {
+		if _, err := os.Stat(filepath.Join(cwd, "go.mod")); err == nil {
+			return cwd
+		}
+		parent := filepath.Dir(cwd)
+		if parent == cwd {
+			break
+		}
+		cwd = parent
+	}
+	return ""
+}
 
 // TestJSONOutputStructure tests that JSON output has consistent structure
 func TestJSONOutputStructure(t *testing.T) {
@@ -49,10 +102,9 @@ func TestJSONOutputStructure(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build command - use compiled binary directly with absolute path
-			exePath := filepath.Join("..", "..", "cmd", "wechat-debug", "wechat-debug.exe")
+			// Build command - use compiled binary directly
 			args := append([]string{tt.command}, tt.args...)
-			cmd := exec.Command(exePath, args...)
+			cmd := exec.Command(testBinaryPath, args...)
 
 			// Run command
 			output, err := cmd.CombinedOutput()
@@ -156,10 +208,9 @@ func TestDiagnosticsFieldWhitelist(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build command - use compiled binary directly with absolute path
-			exePath := filepath.Join("..", "..", "cmd", "wechat-debug", "wechat-debug.exe")
+			// Build command - use compiled binary directly
 			args := append([]string{tt.command}, tt.args...)
-			cmd := exec.Command(exePath, args...)
+			cmd := exec.Command(testBinaryPath, args...)
 
 			// Run command
 			output, err := cmd.CombinedOutput()
@@ -237,10 +288,9 @@ func TestStepOrder(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Build command - use compiled binary directly with absolute path
-			exePath := filepath.Join("..", "..", "cmd", "wechat-debug", "wechat-debug.exe")
+			// Build command - use compiled binary directly
 			args := append([]string{tt.command}, tt.args...)
-			cmd := exec.Command(exePath, args...)
+			cmd := exec.Command(testBinaryPath, args...)
 
 			// Run command
 			output, err := cmd.CombinedOutput()
@@ -343,9 +393,8 @@ func TestMockRealStructureConsistency(t *testing.T) {
 	for command, schema := range schemas {
 		t.Run(command, func(t *testing.T) {
 			// Build command - use compiled binary directly
-			exePath := filepath.Join("cmd", "wechat-debug", "wechat-debug.exe")
 			args := []string{command, "--mock", "--json"}
-			cmd := exec.Command(exePath, args...)
+			cmd := exec.Command(testBinaryPath, args...)
 
 			// Run command
 			output, err := cmd.CombinedOutput()
