@@ -95,6 +95,42 @@ func main() {
 		}
 		nodePath := args[2]
 		clickNode(bridge, uintptr(handle), nodePath)
+	case "diagnose":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump diagnose <window-handle>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		diagnoseBridge(bridge, uintptr(handle))
+	case "debug-windows":
+		debugWindows(bridge)
+	case "debug-accessible":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-accessible <window-handle>")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		debugAccessible(bridge, uintptr(handle))
+	case "debug-nodes":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-nodes <window-handle> [count]")
+		}
+		handle, err := strconv.ParseUint(args[1], 10, 64)
+		if err != nil {
+			log.Fatalf("Invalid window handle: %v", err)
+		}
+		count := 20
+		if len(args) >= 3 {
+			count, err = strconv.Atoi(args[2])
+			if err != nil {
+				count = 20
+			}
+		}
+		debugNodes(bridge, uintptr(handle), count)
 	default:
 		printUsage()
 	}
@@ -110,6 +146,10 @@ func printUsage() {
 	fmt.Println("  bridge-dump focus <handle>           - Focus window")
 	fmt.Println("  bridge-dump click-verify <h> <x> <y> - Click and verify (experimental)")
 	fmt.Println("  bridge-dump click-node <h> <path>    - Click node by path/index")
+	fmt.Println("  bridge-dump diagnose <handle>        - Comprehensive bridge diagnostics")
+	fmt.Println("  bridge-dump debug-windows            - Debug: List all detected windows")
+	fmt.Println("  bridge-dump debug-accessible <handle> - Debug: Accessible object diagnostics")
+	fmt.Println("  bridge-dump debug-nodes <handle> [N] - Debug: First N nodes with detailed info")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
@@ -127,6 +167,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump click-verify 123456 100 200")
 	fmt.Println("  bridge-dump click-node 123456 \"[3]\"")
 	fmt.Println("  bridge-dump click-node 123456 \"[1].[2]\"")
+	fmt.Println("  bridge-dump diagnose 123456          - Comprehensive bridge diagnostics")
 }
 
 func findWeChat(bridge windows.BridgeInterface) {
@@ -550,3 +591,403 @@ func flattenNodesWithPath(nodes []windows.AccessibleNode, parent *windows.Access
 	}
 	return result
 }
+
+// diagnoseBridge 执行综合桥接诊断
+func diagnoseBridge(bridge windows.BridgeInterface, handle uintptr) {
+	fmt.Printf("=== Bridge Diagnostics for Handle: %d ===\n\n", handle)
+
+	// 1. 获取窗口信息
+	fmt.Println("1. Window Information:")
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status == adapter.StatusSuccess {
+		fmt.Printf("   Class: %s\n", info.Class)
+		fmt.Printf("   Title: %s\n", info.Title)
+		fmt.Printf("   Status: %s\n", infoResult.Status)
+	} else {
+		fmt.Printf("   ERROR: %s\n", infoResult.Error)
+	}
+	fmt.Println()
+
+	// 2. 获取可访问对象诊断
+	fmt.Println("2. GetAccessible Diagnostics:")
+	_, accResult := bridge.GetAccessible(handle)
+	if accResult.Status == adapter.StatusSuccess {
+		fmt.Printf("   Accessible object obtained: YES\n")
+		if len(accResult.Diagnostics) > 0 {
+			fmt.Printf("   Diagnostics from GetAccessible:\n")
+			for _, diag := range accResult.Diagnostics {
+				fmt.Printf("     - %s: ", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("%s=%s ", k, v)
+				}
+				fmt.Println()
+			}
+		}
+	} else {
+		fmt.Printf("   Accessible object obtained: NO\n")
+		fmt.Printf("   Error: %s\n", accResult.Error)
+		fmt.Printf("   Reason Code: %s\n", accResult.ReasonCode)
+		if len(accResult.Diagnostics) > 0 {
+			fmt.Printf("   Diagnostics:\n")
+			for _, diag := range accResult.Diagnostics {
+				fmt.Printf("     - %s: ", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("%s=%s ", k, v)
+				}
+				fmt.Println()
+			}
+		}
+	}
+	fmt.Println()
+
+	// 3. 枚举可访问节点
+	fmt.Println("3. EnumerateAccessibleNodes Diagnostics:")
+	nodes, enumResult := bridge.EnumerateAccessibleNodes(handle)
+	if enumResult.Status == adapter.StatusSuccess {
+		fmt.Printf("   Total nodes returned: %d\n", len(nodes))
+
+		// 显示第一个节点（通常是根节点）的信息
+		if len(nodes) > 0 {
+			root := nodes[0]
+			fmt.Printf("   Root node:\n")
+			fmt.Printf("     Name: %s\n", root.Name)
+			fmt.Printf("     Role: %s\n", root.Role)
+			fmt.Printf("     Class: %s\n", root.ClassName)
+			fmt.Printf("     Children count: %d\n", len(root.Children))
+			if len(root.Bounds) == 4 {
+				fmt.Printf("     Bounds: x=%d, y=%d, w=%d, h=%d\n",
+					root.Bounds[0], root.Bounds[1], root.Bounds[2], root.Bounds[3])
+			}
+		}
+
+		// 显示枚举诊断信息
+		if len(enumResult.Diagnostics) > 0 {
+			fmt.Printf("   Enumeration Diagnostics:\n")
+			for _, diag := range enumResult.Diagnostics {
+				fmt.Printf("     - %s: ", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("%s=%s ", k, v)
+				}
+				fmt.Println()
+			}
+		}
+
+		// 扁平化所有节点进行简单分析
+		flatNodes := flattenNodes(nodes, 0, *maxDepth)
+		fmt.Printf("   Flattened nodes count: %d\n", len(flatNodes))
+
+		// 统计角色分布
+		roleCount := make(map[string]int)
+		for _, node := range flatNodes {
+			roleCount[node.Role]++
+		}
+
+		if len(roleCount) > 0 {
+			fmt.Printf("   Role distribution:\n")
+			for role, count := range roleCount {
+				fmt.Printf("     %s: %d\n", role, count)
+			}
+		}
+
+		// 检查是否有列表项节点
+		listItemCount := 0
+		for _, node := range flatNodes {
+			if node.Role == "listitem" || node.Role == "list item" || strings.Contains(strings.ToLower(node.Role), "list") {
+				listItemCount++
+				if listItemCount <= 3 {
+					fmt.Printf("   List item found: name='%s', role='%s'\n", node.Name, node.Role)
+				}
+			}
+		}
+		if listItemCount > 0 {
+			fmt.Printf("   Total list items found: %d\n", listItemCount)
+		}
+
+	} else {
+		fmt.Printf("   Enumeration failed: %s\n", enumResult.Error)
+		if len(enumResult.Diagnostics) > 0 {
+			fmt.Printf("   Diagnostics:\n")
+			for _, diag := range enumResult.Diagnostics {
+				fmt.Printf("     - %s: ", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("%s=%s ", k, v)
+				}
+				fmt.Println()
+			}
+		}
+	}
+	fmt.Println()
+
+	// 4. 诊断总结
+	fmt.Println("4. Diagnostic Summary:")
+	fmt.Printf("   Window handle: %d\n", handle)
+	fmt.Printf("   Window class: %s\n", info.Class)
+	fmt.Printf("   Window title: %s\n", info.Title)
+	fmt.Printf("   GetAccessible succeeded: %v\n", accResult.Status == adapter.StatusSuccess)
+
+	// 确定问题类型
+	if accResult.Status != adapter.StatusSuccess {
+		fmt.Printf("   PROBLEM: Cannot get accessible subtree\n")
+		fmt.Printf("   Reason: %s (code: %s)\n", accResult.Error, accResult.ReasonCode)
+		fmt.Printf("   Recommendation: Try different OBJID or child window\n")
+	} else if len(nodes) == 0 || (len(nodes) == 1 && len(nodes[0].Children) == 0) {
+		fmt.Printf("   PROBLEM: Got accessible subtree but no useful nodes\n")
+		fmt.Printf("   Recommendation: Check if app implements MSAA properly\n")
+	} else {
+		flatNodes := flattenNodes(nodes, 0, *maxDepth)
+		fmt.Printf("   STATUS: Got accessible subtree with %d nodes\n", len(flatNodes))
+		fmt.Printf("   Recommendation: Check rule filtering logic\n")
+	}
+
+	fmt.Println("\n=== End of Diagnostics ===")
+}
+
+// debugWindows 调试窗口列表
+func debugWindows(bridge windows.BridgeInterface) {
+	fmt.Println("=== Debug: Listing All Windows ===")
+
+	// 查找所有顶级窗口
+	handles, result := bridge.FindTopLevelWindows("", "")
+	if result.Status != adapter.StatusSuccess {
+		log.Printf("Failed to enumerate windows: %s", result.Error)
+		return
+	}
+
+	fmt.Printf("Found %d top-level window(s):\n", len(handles))
+	wechatWindows := []uintptr{}
+	for i, handle := range handles {
+		info, infoResult := bridge.GetWindowInfo(handle)
+		if infoResult.Status == adapter.StatusSuccess {
+			// 检查是否是微信窗口
+			isWeChat := info.Class == "WeChatMainWndForPC" || info.Title == "微信"
+			wechatMarker := ""
+			if isWeChat {
+				wechatMarker = " [WECHAT]"
+				wechatWindows = append(wechatWindows, handle)
+			}
+
+			fmt.Printf("  [%d] Handle: 0x%X (%d), Class: %s, Title: %s%s\n",
+				i+1, handle, handle, info.Class, info.Title, wechatMarker)
+		} else {
+			fmt.Printf("  [%d] Handle: 0x%X (%d) [failed to get info]\n", i+1, handle, handle)
+		}
+	}
+
+	// 显示微信窗口的详细信息
+	if len(wechatWindows) > 0 {
+		fmt.Printf("\n=== WeChat Windows Details ===\n")
+		for i, handle := range wechatWindows {
+			info, infoResult := bridge.GetWindowInfo(handle)
+			if infoResult.Status == adapter.StatusSuccess {
+				fmt.Printf("WeChat Window [%d]:\n", i+1)
+				fmt.Printf("  Handle: 0x%X (%d)\n", handle, handle)
+				fmt.Printf("  Class: %s\n", info.Class)
+				fmt.Printf("  Title: %s\n", info.Title)
+
+				// 尝试获取可访问对象
+				fmt.Printf("  Testing GetAccessible...\n")
+				_, accResult := bridge.GetAccessible(handle)
+				if accResult.Status == adapter.StatusSuccess {
+					fmt.Printf("    SUCCESS: Accessible object obtained\n")
+				} else {
+					fmt.Printf("    FAILED: %s\n", accResult.Error)
+				}
+				fmt.Println()
+			}
+		}
+	}
+
+	fmt.Println("\n=== Debug Windows Complete ===")
+}
+
+// debugAccessible 调试可访问对象
+func debugAccessible(bridge windows.BridgeInterface, handle uintptr) {
+	fmt.Printf("=== Debug: Accessible Diagnostics for Handle: 0x%X (%d) ===\n\n", handle, handle)
+
+	// 获取窗口信息
+	info, infoResult := bridge.GetWindowInfo(handle)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	fmt.Printf("Window Information:\n")
+	fmt.Printf("  Handle: 0x%X (%d)\n", handle, handle)
+	fmt.Printf("  Class: %s\n", info.Class)
+	fmt.Printf("  Title: %s\n", info.Title)
+	fmt.Println()
+
+	// 尝试获取可访问对象
+	fmt.Printf("Attempting GetAccessible...\n")
+	_, result := bridge.GetAccessible(handle)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("  FAILED: %s (code: %s)\n", result.Error, result.ReasonCode)
+
+		// 显示详细诊断信息
+		if len(result.Diagnostics) > 0 {
+			fmt.Printf("  Diagnostics:\n")
+			for _, diag := range result.Diagnostics {
+				fmt.Printf("    - %s\n", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("      %s: %s\n", k, v)
+				}
+			}
+		}
+
+		// 建议尝试子窗口
+		fmt.Printf("\nSuggestion: Try child windows if parent window fails.\n")
+		fmt.Printf("Use 'bridge-dump debug-windows' to see child window handles.\n")
+		fmt.Printf("Then use 'bridge-dump debug-accessible <child-handle>' to test.\n")
+	} else {
+		fmt.Printf("  SUCCESS: Accessible object obtained\n")
+
+		// 显示诊断信息
+		if len(result.Diagnostics) > 0 {
+			fmt.Printf("  Diagnostics:\n")
+			for _, diag := range result.Diagnostics {
+				fmt.Printf("    - %s\n", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("      %s: %s\n", k, v)
+				}
+			}
+		}
+
+		// 通过 EnumerateAccessibleNodes 获取更多信息
+		fmt.Printf("\nEnumerating accessible nodes for more details...\n")
+		nodes, enumResult := bridge.EnumerateAccessibleNodes(handle)
+		if enumResult.Status == adapter.StatusSuccess {
+			fmt.Printf("  Enumeration succeeded: found %d top-level node(s)\n", len(nodes))
+			if len(nodes) > 0 {
+				root := nodes[0]
+				fmt.Printf("  Root node children: %d\n", len(root.Children))
+
+				// 扁平化显示前几个节点
+				flatNodes := flattenNodes(nodes, 0, 3)
+				displayCount := 5
+				if len(flatNodes) < displayCount {
+					displayCount = len(flatNodes)
+				}
+
+				if displayCount > 0 {
+					fmt.Printf("  First %d nodes:\n", displayCount)
+					for i := 0; i < displayCount; i++ {
+						node := flatNodes[i]
+						fmt.Printf("    [%d] Name: %s, Role: %s\n", i, node.Name, node.Role)
+					}
+				}
+			}
+		} else {
+			fmt.Printf("  Enumeration failed: %s\n", enumResult.Error)
+		}
+	}
+
+	fmt.Println("\n=== Debug Accessible Complete ===")
+}
+
+// debugNodes 调试节点信息
+func debugNodes(bridge windows.BridgeInterface, handle uintptr, count int) {
+	fmt.Printf("=== Debug: First %d Nodes for Handle: 0x%X (%d) ===\n\n", count, handle, handle)
+
+	// 枚举节点
+	nodes, result := bridge.EnumerateAccessibleNodes(handle)
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("ERROR: Failed to enumerate nodes: %s\n", result.Error)
+
+		// 显示诊断信息
+		if len(result.Diagnostics) > 0 {
+			fmt.Printf("Diagnostics:\n")
+			for _, diag := range result.Diagnostics {
+				fmt.Printf("  - %s\n", diag.Message)
+				for k, v := range diag.Context {
+					fmt.Printf("    %s: %s\n", k, v)
+				}
+			}
+		}
+		return
+	}
+
+	// 显示诊断信息
+	if len(result.Diagnostics) > 0 {
+		fmt.Printf("Enumeration Diagnostics:\n")
+		for _, diag := range result.Diagnostics {
+			fmt.Printf("  - %s\n", diag.Message)
+			for k, v := range diag.Context {
+				fmt.Printf("    %s: %s\n", k, v)
+			}
+		}
+		fmt.Println()
+	}
+
+	// 扁平化所有节点
+	flatNodes := flattenNodes(nodes, 0, 10) // 使用较大的深度
+
+	fmt.Printf("Total nodes found: %d\n", len(flatNodes))
+	fmt.Printf("Showing first %d nodes:\n\n", count)
+
+	displayCount := count
+	if len(flatNodes) < displayCount {
+		displayCount = len(flatNodes)
+	}
+
+	for i := 0; i < displayCount; i++ {
+		node := flatNodes[i]
+		fmt.Printf("Node [%d]:\n", i)
+		fmt.Printf("  Handle: %d\n", node.Handle)
+		fmt.Printf("  Name: %s\n", node.Name)
+		fmt.Printf("  Role: %s\n", node.Role)
+		fmt.Printf("  Class: %s\n", node.ClassName)
+		if len(node.Bounds) == 4 {
+			fmt.Printf("  Bounds: x=%d, y=%d, w=%d, h=%d\n",
+				node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3])
+		}
+
+		// 构建树路径（简化）
+		fmt.Printf("  Tree path: ")
+		if i == 0 {
+			fmt.Printf("root")
+		} else {
+			// 简单索引路径
+			fmt.Printf("[%d]", i)
+		}
+
+		fmt.Printf("\n\n")
+	}
+
+	if len(flatNodes) == 0 {
+		fmt.Printf("WARNING: No nodes found. This indicates bridge layer issue.\n")
+		fmt.Printf("Diagnostic summary:\n")
+		fmt.Printf("  - Accessible object obtained: %v\n",
+			containsDiagnostic(result.Diagnostics, "accessible_obtained", "true"))
+		fmt.Printf("  - Child count: %s\n",
+			getDiagnosticValue(result.Diagnostics, "child_count", "0"))
+		fmt.Printf("  - Bridge layer blocked: %s\n",
+			getDiagnosticValue(result.Diagnostics, "bridge_layer_blocked", "unknown"))
+	}
+
+	fmt.Println("=== Debug Nodes Complete ===")
+}
+
+// containsDiagnostic 检查诊断中是否包含特定键值
+func containsDiagnostic(diagnostics []adapter.Diagnostic, key, value string) bool {
+	for _, diag := range diagnostics {
+		if diag.Context != nil {
+			if val, ok := diag.Context[key]; ok && val == value {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// getDiagnosticValue 获取诊断中的值
+func getDiagnosticValue(diagnostics []adapter.Diagnostic, key, defaultValue string) string {
+	for _, diag := range diagnostics {
+		if diag.Context != nil {
+			if val, ok := diag.Context[key]; ok {
+				return val
+			}
+		}
+	}
+	return defaultValue
+}
+

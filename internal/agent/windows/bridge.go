@@ -3,6 +3,7 @@
 package windows
 
 import (
+	"fmt"
 	"strconv"
 	"syscall"
 	"time"
@@ -27,6 +28,7 @@ var (
 	procFindWindow          = moduser32.NewProc("FindWindowW")
 	procFindWindowEx        = moduser32.NewProc("FindWindowExW")
 	procEnumWindows         = moduser32.NewProc("EnumWindows")
+	procEnumChildWindows    = moduser32.NewProc("EnumChildWindows")
 	procGetClassName        = moduser32.NewProc("GetClassNameW")
 	procGetWindowText       = moduser32.NewProc("GetWindowTextW")
 	procGetWindowTextLength = moduser32.NewProc("GetWindowTextLengthW")
@@ -243,15 +245,68 @@ func (b *Bridge) GetAccessible(windowHandle uintptr) (*IAccessible, adapter.Resu
 	)
 
 	if ret != 0 || pAcc == nil {
+		// 添加详细的诊断信息
 		return nil, adapter.Result{
 			Status:     adapter.StatusFailed,
 			ReasonCode: adapter.ReasonCode("ACCESSIBLE_NOT_FOUND"),
+			Error:      "AccessibleObjectFromWindow failed",
+			Diagnostics: []adapter.Diagnostic{
+				{
+					Timestamp: time.Now(),
+					Level:     "error",
+					Message:   "AccessibleObjectFromWindow failed",
+					Context: map[string]string{
+						"window_handle":     strconv.FormatUint(uint64(windowHandle), 10),
+						"return_code":       strconv.FormatUint(uint64(ret), 16),
+						"return_code_hex":   fmt.Sprintf("0x%X", ret),
+						"pAcc_is_nil":       strconv.FormatBool(pAcc == nil),
+						"objid_client":      "0xFFFFFFFC",
+						"iid_accessible":    fmt.Sprintf("%v", IID_IAccessible),
+						"accessible_object": "false",
+						"fallback_reason":   "accessible_object_from_window_failed",
+					},
+				},
+			},
+		}
+	}
+
+	// 获取child_count用于诊断
+	var childCount uintptr = 0
+	if pAcc != nil && pAcc.lpVtbl != nil {
+		vtbl := (*IAccessibleVtbl)(unsafe.Pointer(pAcc.lpVtbl))
+		if vtbl.get_accChildCount != 0 {
+			// 调用 get_accChildCount
+			count, _, _ := syscall.Syscall(
+				vtbl.get_accChildCount,
+				1,
+				uintptr(unsafe.Pointer(pAcc)),
+				0,
+				0,
+			)
+			childCount = count
 		}
 	}
 
 	return pAcc, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "AccessibleObjectFromWindow succeeded",
+				Context: map[string]string{
+					"window_handle":      strconv.FormatUint(uint64(windowHandle), 10),
+					"return_code":        "0x0",
+					"return_code_hex":    "0x0",
+					"accessible_obtained": "true",
+					"pAcc_is_nil":        strconv.FormatBool(pAcc == nil),
+					"child_count":        strconv.FormatUint(uint64(childCount), 10),
+					"objid_client":       "0xFFFFFFFC",
+					"iid_accessible":     fmt.Sprintf("%v", IID_IAccessible),
+				},
+			},
+		},
 	}
 }
 
@@ -392,6 +447,161 @@ func (b *Bridge) FocusWindow(handle uintptr) adapter.Result {
 	}
 }
 
+// tryChildWindows 尝试枚举子窗口并获取可访问对象
+func (b *Bridge) tryChildWindows(parentHandle uintptr) (uintptr, *IAccessible, adapter.Result) {
+	// 存储找到的有效子窗口句柄
+	var foundHandle uintptr
+	var foundAcc *IAccessible
+	var foundResult adapter.Result
+	var foundInfo WindowInfo
+
+	// 枚举所有子窗口
+	childHandles := []uintptr{}
+	err := enumerateChildWindows(parentHandle, func(hwnd uintptr, lParam uintptr) uintptr {
+		childHandles = append(childHandles, hwnd)
+		return 1 // 继续枚举
+	})
+
+	if err != nil {
+		return 0, nil, adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("ENUM_CHILD_FAILED"),
+			Error:      "Failed to enumerate child windows",
+		}
+	}
+
+	// 诊断信息：记录子窗口数量
+	diagnostics := []adapter.Diagnostic{
+		{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   "Trying child windows",
+			Context: map[string]string{
+				"parent_handle": strconv.FormatUint(uint64(parentHandle), 10),
+				"child_count":   strconv.Itoa(len(childHandles)),
+			},
+		},
+	}
+
+	// 尝试每个子窗口
+	for i, childHandle := range childHandles {
+		// 获取子窗口信息
+		childInfo, infoResult := b.GetWindowInfo(childHandle)
+		if infoResult.Status != adapter.StatusSuccess {
+			continue
+		}
+
+		// 尝试获取可访问对象
+		pAcc, accResult := b.GetAccessible(childHandle)
+		if accResult.Status == adapter.StatusSuccess {
+			// 检查是否有有效的子节点
+			childCount := b.getAccChildCount(pAcc)
+
+			// 即使 childCount == 0，也返回该窗口，因为它可能本身是有效的可访问对象
+			// 但优先选择有子节点的窗口
+			if childCount > 0 || foundAcc == nil {
+				// 如果已经有找到的窗口且有子节点，但当前窗口没有子节点，则不覆盖
+				if foundAcc != nil && b.getAccChildCount(foundAcc) > 0 && childCount == 0 {
+					// 保持已有的有子节点的窗口
+				} else {
+					foundHandle = childHandle
+					foundAcc = pAcc
+					foundResult = accResult
+					foundInfo = childInfo
+
+					// 添加成功诊断
+					successReason := "accessible_with_children"
+					if childCount == 0 {
+						successReason = "accessible_no_children"
+					}
+
+					diagnostics = append(diagnostics, adapter.Diagnostic{
+						Timestamp: time.Now(),
+						Level:     "info",
+						Message:   "Found accessible child window",
+						Context: map[string]string{
+							"child_handle":   strconv.FormatUint(uint64(childHandle), 10),
+							"child_class":    childInfo.Class,
+							"child_title":    childInfo.Title,
+							"child_index":    strconv.Itoa(i),
+							"child_count":    strconv.FormatUint(uint64(childCount), 10),
+							"success_reason": successReason,
+							"window_selected": "true",
+							"has_children":    strconv.FormatBool(childCount > 0),
+						},
+					})
+
+					// 将accResult的诊断信息也添加进来
+					diagnostics = append(diagnostics, accResult.Diagnostics...)
+				}
+			}
+
+			// 记录 childCount == 0 的情况用于诊断
+			if childCount == 0 {
+				diagnostics = append(diagnostics, adapter.Diagnostic{
+					Timestamp: time.Now(),
+					Level:     "debug",
+					Message:   "Child window has no children",
+					Context: map[string]string{
+						"child_handle": strconv.FormatUint(uint64(childHandle), 10),
+						"child_class":  childInfo.Class,
+						"child_title":  childInfo.Title,
+						"child_index":  strconv.Itoa(i),
+						"child_count":  "0",
+						"accessible":   "true",
+						"note":         "Window is accessible but has no child nodes",
+					},
+				})
+			}
+		}
+
+		// 记录尝试日志
+		diagnostics = append(diagnostics, adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "debug",
+			Message:   "Tried child window",
+			Context: map[string]string{
+				"child_handle": strconv.FormatUint(uint64(childHandle), 10),
+				"child_class":  childInfo.Class,
+				"child_title":  childInfo.Title,
+				"child_index":  strconv.Itoa(i),
+				"accessible":   strconv.FormatBool(accResult.Status == adapter.StatusSuccess),
+				"error":        accResult.Error,
+			},
+		})
+	}
+
+	// 检查是否找到了可访问对象
+	if foundAcc != nil {
+		// 添加最终诊断
+		childCount := b.getAccChildCount(foundAcc)
+		diagnostics = append(diagnostics, adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   "Selected best child window for accessible tree",
+			Context: map[string]string{
+				"selected_handle":  strconv.FormatUint(uint64(foundHandle), 10),
+				"selected_class":   foundInfo.Class,
+				"selected_title":   foundInfo.Title,
+				"child_count":      strconv.FormatUint(uint64(childCount), 10),
+				"has_children":     strconv.FormatBool(childCount > 0),
+				"selection_method": "first_accessible_with_children_or_any",
+			},
+		})
+
+		foundResult.Diagnostics = diagnostics
+		return foundHandle, foundAcc, foundResult
+	}
+
+	// 如果没有找到有效的子窗口
+	return 0, nil, adapter.Result{
+		Status:     adapter.StatusFailed,
+		ReasonCode: adapter.ReasonCode("NO_VALID_CHILD"),
+		Error:      "No child window with accessible subtree found",
+		Diagnostics: diagnostics,
+	}
+}
+
 // EnumerateAccessibleNodes 枚举可访问节点
 func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNode, adapter.Result) {
 	if !b.initialized {
@@ -415,35 +625,108 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 	// 尝试获取可访问对象
 	pAcc, result := b.GetAccessible(windowHandle)
 	if result.Status != adapter.StatusSuccess {
-		// 如果无法获取 IAccessible，返回基本窗口节点而不是错误
-		// 这样可以让适配器继续工作
-		nodes := []AccessibleNode{
-			{
-				Handle:    windowHandle,
-				Name:      info.Title,
-				Role:      "window",
-				ClassName: info.Class,
-			},
-		}
-		return nodes, adapter.Result{
-			Status:     adapter.StatusSuccess,
-			ReasonCode: adapter.ReasonOK,
-			Diagnostics: []adapter.Diagnostic{
-				{
-					Timestamp: time.Now(),
-					Level:     "warning",
-					Message:   "GetAccessible failed, falling back to window node",
-					Context: map[string]string{
-						"window_handle": strconv.FormatUint(uint64(windowHandle), 10),
-						"window_class":  info.Class,
-						"window_title":  info.Title,
-						"error":         result.Error,
-						"reason_code":   string(result.ReasonCode),
-					},
+		// 首先尝试子窗口
+		childHandle, childAcc, childResult := b.tryChildWindows(windowHandle)
+		if childResult.Status == adapter.StatusSuccess && childAcc != nil {
+			// 使用找到的子窗口句柄和可访问对象
+			effectiveHandle := childHandle
+			pAcc = childAcc
+			result = childResult
+
+			// 更新窗口信息为子窗口信息
+			childInfo, childInfoResult := b.GetWindowInfo(effectiveHandle)
+			if childInfoResult.Status == adapter.StatusSuccess {
+				info = childInfo
+			}
+
+			// 添加诊断信息表明我们使用了子窗口
+			childResult.Diagnostics = append(childResult.Diagnostics, adapter.Diagnostic{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Using child window instead of parent",
+				Context: map[string]string{
+					"parent_handle": strconv.FormatUint(uint64(windowHandle), 10),
+					"child_handle":  strconv.FormatUint(uint64(effectiveHandle), 10),
+					"child_class":   info.Class,
+					"child_title":   info.Title,
 				},
-			},
+			})
+		} else {
+			// 子窗口也失败，返回基本窗口节点
+			nodes := []AccessibleNode{
+				{
+					Handle:    windowHandle,
+					Name:      info.Title,
+					Role:      "window",
+					ClassName: info.Class,
+				},
+			}
+
+			// 收集所有诊断信息
+			diagnostics := []adapter.Diagnostic{}
+			// 添加GetAccessible的诊断信息
+			diagnostics = append(diagnostics, result.Diagnostics...)
+			// 添加子窗口尝试的诊断信息
+			if childResult.Diagnostics != nil {
+				diagnostics = append(diagnostics, childResult.Diagnostics...)
+			}
+			// 添加fallback诊断
+			fallbackReason := "accessible_not_found_no_child"
+			if result.ReasonCode == adapter.ReasonCode("ACCESSIBLE_NOT_FOUND") {
+				if result.Diagnostics != nil && len(result.Diagnostics) > 0 {
+					for _, diag := range result.Diagnostics {
+						if diag.Context != nil && diag.Context["return_code_hex"] != "" {
+							fallbackReason = fmt.Sprintf("accessible_object_from_window_failed_%s", diag.Context["return_code_hex"])
+							break
+						}
+					}
+				}
+			}
+
+			// 尝试获取子窗口数量信息
+			childWindowCount := "0"
+			if childResult.Diagnostics != nil {
+				for _, diag := range childResult.Diagnostics {
+					if diag.Context != nil && diag.Context["child_count"] != "" {
+						childWindowCount = diag.Context["child_count"]
+						break
+					}
+				}
+			}
+
+			diagnostics = append(diagnostics, adapter.Diagnostic{
+				Timestamp: time.Now(),
+				Level:     "warning",
+				Message:   "GetAccessible failed, falling back to window node",
+				Context: map[string]string{
+					"window_handle":              strconv.FormatUint(uint64(windowHandle), 10),
+					"window_class":               info.Class,
+					"window_title":               info.Title,
+					"error":                      result.Error,
+					"reason_code":                string(result.ReasonCode),
+					"fallback_reason":            fallbackReason,
+					"accessible_object_obtained": "false",
+					"child_count":                "0",
+					"child_window_tried":         "true",
+					"child_window_found":         "false",
+					"total_child_windows":        childWindowCount,
+					"objid_client":               "0xFFFFFFFC",
+					"bridge_issue":               "true",
+					"bridge_layer_blocked":       "true",
+					"diagnostic_summary":         fmt.Sprintf("AccessibleObjectFromWindow failed with code %s, no valid child window found", result.ReasonCode),
+				},
+			})
+
+			return nodes, adapter.Result{
+				Status:     adapter.StatusSuccess,
+				ReasonCode: adapter.ReasonOK,
+				Diagnostics: diagnostics,
+			}
 		}
 	}
+
+	// 获取根节点的子节点数量
+	childCount := b.getAccChildCount(pAcc)
 
 	// 创建根节点
 	rootNode := AccessibleNode{
@@ -457,9 +740,58 @@ func (b *Bridge) EnumerateAccessibleNodes(windowHandle uintptr) ([]AccessibleNod
 	children := b.enumerateAccessibleChildren(pAcc, 0, 1)
 	rootNode.Children = children
 
+	// 收集诊断信息
+	diagnostics := []adapter.Diagnostic{}
+	// 添加GetAccessible的诊断信息
+	diagnostics = append(diagnostics, result.Diagnostics...)
+	// 添加枚举诊断
+	fallbackUsed := "false"
+	effectiveWindowHandle := windowHandle
+	if result.Diagnostics != nil {
+		for _, diag := range result.Diagnostics {
+			if diag.Context != nil && diag.Context["child_handle"] != "" {
+				fallbackUsed = "true"
+				parsedHandle, _ := strconv.ParseUint(diag.Context["child_handle"], 10, 64)
+				effectiveWindowHandle = uintptr(parsedHandle)
+				break
+			}
+		}
+	}
+
+	// 扁平化所有节点用于统计
+	allNodes := []AccessibleNode{rootNode}
+	for _, child := range children {
+		allNodes = append(allNodes, child)
+		// 递归收集所有子节点（简化版）
+		allNodes = append(allNodes, flattenNodeChildren(child)...)
+	}
+
+	diagnostics = append(diagnostics, adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     "info",
+		Message:   "EnumerateAccessibleNodes succeeded",
+		Context: map[string]string{
+			"window_handle":           strconv.FormatUint(uint64(windowHandle), 10),
+			"effective_window_handle": strconv.FormatUint(uint64(effectiveWindowHandle), 10),
+			"window_class":            info.Class,
+			"window_title":            info.Title,
+			"accessible_obtained":     "true",
+			"root_child_count":        strconv.FormatUint(uint64(childCount), 10),
+			"children_enumerated":     strconv.Itoa(len(children)),
+			"total_nodes_count":       strconv.Itoa(len(allNodes)),
+			"fallback_used":           fallbackUsed,
+			"root_name":               info.Title,
+			"root_role":               "window",
+			"objid_client":            "0xFFFFFFFC",
+			"bridge_layer_status":     "success",
+			"diagnostic_summary":      fmt.Sprintf("Got accessible subtree with %d total nodes, root child count: %d", len(allNodes), childCount),
+		},
+	})
+
 	return []AccessibleNode{rootNode}, adapter.Result{
 		Status:     adapter.StatusSuccess,
 		ReasonCode: adapter.ReasonOK,
+		Diagnostics: diagnostics,
 	}
 }
 
@@ -1286,6 +1618,45 @@ func enumerateWindows(callback EnumWindowsCallback) error {
 		return syscall.GetLastError()
 	}
 	return nil
+}
+
+// EnumChildWindowsCallback 是 EnumChildWindows 的回调函数类型
+// 返回非零值继续枚举，返回零值停止枚举
+type EnumChildWindowsCallback func(hwnd uintptr, lParam uintptr) uintptr
+
+// enumChildWindowsProcWrapper 是 EnumChildWindowsProc 的 Go 包装器
+var enumChildWindowsProcWrapper EnumChildWindowsCallback
+
+// enumChildWindowsProc 是 C 语言风格的回调函数，必须使用 syscall.NewCallback 创建
+func enumChildWindowsProc(hwnd uintptr, lParam uintptr) uintptr {
+	if enumChildWindowsProcWrapper != nil {
+		return enumChildWindowsProcWrapper(hwnd, lParam)
+	}
+	return 1 // 继续枚举
+}
+
+// enumerateChildWindows 使用 EnumChildWindows API 枚举子窗口
+func enumerateChildWindows(parentHandle uintptr, callback EnumChildWindowsCallback) error {
+	enumChildWindowsProcWrapper = callback
+	defer func() { enumChildWindowsProcWrapper = nil }()
+
+	procCallback := syscall.NewCallback(enumChildWindowsProc)
+	ret, _, _ := procEnumChildWindows.Call(parentHandle, procCallback, 0)
+	if ret == 0 {
+		return syscall.GetLastError()
+	}
+	return nil
+}
+
+// flattenNodeChildren 递归扁平化节点的子节点
+func flattenNodeChildren(node AccessibleNode) []AccessibleNode {
+	result := []AccessibleNode{}
+	for _, child := range node.Children {
+		result = append(result, child)
+		// 递归获取子节点的子节点
+		result = append(result, flattenNodeChildren(child)...)
+	}
+	return result
 }
 
 // IID_IAccessible 接口 ID
