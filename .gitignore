@@ -51,3 +51,6 @@ vendor/
 
 # Tesseract language data
 tessdata/
+
+# Claude Code configuration
+.claude/

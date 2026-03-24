@@ -13,10 +13,11 @@ import (
 )
 
 var (
-	jsonOutput = flag.Bool("json", false, "Output as JSON")
-	maxDepth   = flag.Int("depth", 5, "Maximum recursion depth for node traversal")
-	filterRole = flag.String("role", "", "Filter nodes by role (e.g., 'list item')")
-	filterName = flag.String("name", "", "Filter nodes by name (substring match)")
+	jsonOutput    = flag.Bool("json", false, "Output as JSON")
+	maxDepth      = flag.Int("depth", 5, "Maximum recursion depth for node traversal")
+	filterRole    = flag.String("role", "", "Filter nodes by role (e.g., 'list item')")
+	filterName    = flag.String("name", "", "Filter nodes by name (substring match)")
+	splitRegions  = flag.Bool("split-regions", false, "Split window into regions for OCR (left_sidebar, message_area, input_area)")
 )
 
 func main() {
@@ -181,12 +182,14 @@ func printUsage() {
 	fmt.Println("  bridge-dump debug-nodes <handle> [N] - Debug: First N nodes with detailed info")
 	fmt.Println("  bridge-dump debug-uia <handle> [N]   - Debug: First N UIA nodes")
 	fmt.Println("  bridge-dump debug-ocr <handle> [lang] - Debug: OCR text extraction")
+	fmt.Println("                                         Use --split-regions for region-based OCR")
 	fmt.Println("")
 	fmt.Println("Options:")
 	fmt.Println("  --json                              - Output as JSON")
 	fmt.Println("  --depth <n>                         - Maximum recursion depth (default: 5)")
 	fmt.Println("  --role <role>                       - Filter nodes by role")
 	fmt.Println("  --name <name>                       - Filter nodes by name (substring)")
+	fmt.Println("  --split-regions                     - Split window into regions for OCR")
 	fmt.Println("")
 	fmt.Println("Examples:")
 	fmt.Println("  bridge-dump find-wechat")
@@ -1123,6 +1126,7 @@ func debugOCR(bridge windows.BridgeInterface, handle uintptr, lang string) {
 	fmt.Printf("  Class: %s\n", info.Class)
 	fmt.Printf("  Title: %s\n", info.Title)
 	fmt.Printf("  Language: %s\n", lang)
+	fmt.Printf("  Split Regions Mode: %v\n", *splitRegions)
 	fmt.Println()
 
 	// 类型断言以访问 OCR 方法
@@ -1133,8 +1137,18 @@ func debugOCR(bridge windows.BridgeInterface, handle uintptr, lang string) {
 		return
 	}
 
-	// 提取文本
-	ocrResult, result := winBridge.ExtractTextFromWindow(handle, lang)
+	var ocrResult windows.OCRDebugResult
+	var result adapter.Result
+
+	// 根据标志选择OCR方法
+	if *splitRegions {
+		fmt.Printf("Using split-regions mode (left_sidebar, message_area, input_area)\n")
+		ocrResult, result = winBridge.ExtractTextFromWindowRegions(handle, lang)
+	} else {
+		fmt.Printf("Using full-window OCR mode\n")
+		ocrResult, result = winBridge.ExtractTextFromWindow(handle, lang)
+	}
+
 	if result.Status != adapter.StatusSuccess {
 		fmt.Printf("ERROR: Failed to extract text: %s\n", result.Error)
 
@@ -1175,23 +1189,44 @@ func debugOCR(bridge windows.BridgeInterface, handle uintptr, lang string) {
 	}
 	fmt.Println()
 
-	// 显示提取的文本
-	fmt.Printf("Extracted Text (%d characters):\n", len(ocrResult.Text))
-	fmt.Println("--- BEGIN TEXT ---")
-	if ocrResult.Text == "" {
-		fmt.Println("(No text extracted)")
-	} else {
+	// 显示提取的文本（全图模式）
+	if !*splitRegions && ocrResult.Text != "" {
+		fmt.Printf("Extracted Text (%d characters):\n", len(ocrResult.Text))
+		fmt.Println("--- BEGIN TEXT ---")
 		fmt.Println(ocrResult.Text)
+		fmt.Println("--- END TEXT ---")
+		fmt.Println()
 	}
-	fmt.Println("--- END TEXT ---")
-	fmt.Println()
 
-	// 显示区域文本（如果有）
+	// 显示区域文本（分区域模式或后备模式）
 	if len(ocrResult.RegionTexts) > 0 {
 		fmt.Printf("Region Texts:\n")
 		for regionName, regionText := range ocrResult.RegionTexts {
-			fmt.Printf("  [%s]: %s\n", regionName, regionText)
+			textLength := len(regionText)
+			fmt.Printf("  [%s] (%d chars): ", regionName, textLength)
+			if textLength == 0 {
+				fmt.Printf("(empty)\n")
+			} else if textLength <= 100 {
+				fmt.Printf("%s\n", regionText)
+			} else {
+				fmt.Printf("%s...\n", regionText[:100])
+			}
 		}
+		fmt.Println()
+	} else if *splitRegions {
+		fmt.Printf("WARNING: No region texts extracted in split-regions mode\n")
+		fmt.Println()
+	}
+
+	// 显示区域尺寸信息（分区域模式）
+	if *splitRegions && ocrResult.WindowWidth > 0 && ocrResult.WindowHeight > 0 {
+		fmt.Printf("Region Dimensions (based on window %dx%d):\n", ocrResult.WindowWidth, ocrResult.WindowHeight)
+		fmt.Printf("  left_sidebar:    x=0, y=0, width=%d (30%%), height=%d\n",
+			ocrResult.WindowWidth*30/100, ocrResult.WindowHeight)
+		fmt.Printf("  message_area:    x=%d, y=0, width=%d (70%%), height=%d (70%%)\n",
+			ocrResult.WindowWidth*30/100, ocrResult.WindowWidth*70/100, ocrResult.WindowHeight*70/100)
+		fmt.Printf("  input_area:      x=%d, y=%d, width=%d (70%%), height=%d (30%%)\n",
+			ocrResult.WindowWidth*30/100, ocrResult.WindowHeight*70/100, ocrResult.WindowWidth*70/100, ocrResult.WindowHeight*30/100)
 		fmt.Println()
 	}
 
