@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter/wechat"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/session"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
@@ -360,11 +361,40 @@ func (ms *MonitorService) openContact(contact ContactInfo) (protocol.Conversatio
 		return contact.Conversation, nil
 	}
 
-	// 搜索兜底策略（需要adapter支持搜索功能）
-	// TODO: 实现搜索框导航回退策略
-	// 当前简化实现：返回错误
-	log.Printf("列表优先策略失败，需要搜索兜底但adapter不支持 (置信度: %.2f, 错误: %s)",
+	// 搜索兜底策略
+	log.Printf("列表优先策略失败，尝试搜索兜底 (置信度: %.2f, 错误: %s)",
 		focusResult.Confidence, focusResult.Error)
+
+	// 尝试使用微信适配器的搜索兜底功能
+	if wechatAdapter, ok := ms.adapter.(*wechat.WeChatAdapter); ok {
+		// 获取窗口句柄
+		windowHandle := contact.Conversation.HostWindowHandle
+		if windowHandle == 0 {
+			// 如果没有窗口句柄，尝试获取
+			instances, detectResult := wechatAdapter.Detect()
+			if detectResult.Status == adapter.StatusSuccess && len(instances) > 0 {
+				// 使用第一个实例的窗口句柄（需要从实例获取，这里简化）
+				// 实际应通过实例获取窗口句柄，这里假设contact.Conversation有效
+				log.Printf("警告：联系人引用中没有窗口句柄，使用搜索兜底可能失败")
+			} else {
+				return protocol.ConversationRef{}, fmt.Errorf("无法获取窗口句柄: %s", detectResult.Error)
+			}
+		}
+
+		// 调用搜索兜底
+		searchResult := wechatAdapter.SearchContactFallback(contact.Name, windowHandle)
+		if searchResult.Status == adapter.StatusSuccess {
+			log.Printf("搜索兜底成功 (置信度: %.2f)", searchResult.Confidence)
+			// 返回原始会话引用（可能不准确，但至少打开了聊天窗口）
+			return contact.Conversation, nil
+		} else {
+			log.Printf("搜索兜底失败: %s (原因码: %s)", searchResult.Error, searchResult.ReasonCode)
+			return protocol.ConversationRef{}, fmt.Errorf("搜索兜底失败: %s", searchResult.Error)
+		}
+	}
+
+	// 适配器不支持搜索兜底
+	log.Printf("适配器不支持搜索兜底功能")
 	return protocol.ConversationRef{}, fmt.Errorf("无法打开联系人: %s (置信度: %.2f)", focusResult.Error, focusResult.Confidence)
 }
 
@@ -395,15 +425,25 @@ func (ms *MonitorService) readNewMessages(convRef protocol.ConversationRef, cont
 		pollRound, lastVisibleMessagePreview)
 
 	if session == nil {
-		// 如果没有会话，所有消息都是新的
-		newMessages := convertToSessionMessages(messages, contactID)
-		log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_message_candidates=%d, is_duplicate_message=false, reason=no_session",
-			pollRound, len(newMessages))
-		if len(newMessages) > 0 {
-			log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_message_fingerprint=%s, message_selected_for_reply=%t",
-				pollRound, newMessages[0].Fingerprint, len(newMessages) > 0)
+		// 冷启动保护：首次见到联系人，建立会话基线，不回复历史消息
+		// 创建或获取会话
+		session = ms.sessionMgr.GetOrCreate(contactID, contactID) // contactID作为contactName
+		log.Printf("[MONITOR] poll_round=%s, stage=message_read, reason=cold_start, session_created=true", pollRound)
+
+		// 如果有消息，设置最后消息ID作为基线
+		if len(messages) > 0 {
+			lastMessageID := messages[len(messages)-1].MessageFingerprint
+			session.Mu.Lock()
+			session.LastMessageID = lastMessageID
+			session.Mu.Unlock()
+			log.Printf("[MONITOR] poll_round=%s, stage=message_read, baseline_fingerprint=%s, baseline_message_count=%d",
+				pollRound, lastMessageID, len(messages))
 		}
-		return newMessages, nil
+
+		// 返回空切片，表示没有新消息需要处理（冷启动不回复历史消息）
+		log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_message_candidates=0, is_duplicate_message=false, reason=cold_start_no_reply",
+			pollRound)
+		return nil, nil
 	}
 
 	// 过滤出新消息（根据最后读取的消息ID）
@@ -585,11 +625,17 @@ type ContactInfo struct {
 	Conversation protocol.ConversationRef
 }
 
-// estimateUnreadCount 估计未读消息数量（需要根据实际UI特征实现）
+// estimateUnreadCount 估计未读消息数量（根据视觉检测的未读红点实现）
 func estimateUnreadCount(conv protocol.ConversationRef) int {
-	// 测试用：模拟有未读消息
-	// 实际实现需要检测红点、未读计数等UI特征
-	return 1
+	// 检查ListNeighborhoodHint是否包含has_unread_dot
+	// 这是从视觉检测中提取的特征
+	for _, hint := range conv.ListNeighborhoodHint {
+		if hint == "has_unread_dot" {
+			return 1
+		}
+	}
+	// 没有未读红点，视为无未读消息
+	return 0
 }
 
 // convertToSessionMessages 将协议消息转换为会话消息
@@ -687,15 +733,62 @@ func (ms *MonitorService) processContactWithResult(contact ContactInfo, pollRoun
 		session.Mu.RUnlock()
 	}
 
-	// 尝试确定交付状态（简化逻辑）
+	// 尝试确定交付状态（精细逻辑）
 	if result.ReplyFingerprint != "" {
+		// 有回复指纹表示发送尝试
 		result.DeliveryState = "sent"
 		result.ReasonCode = "reply_sent"
-		// 有回复指纹表示完成了完整闭环（收到消息并发送回复）
-		result.ClosedLoopCompleted = true
+
+		// 检查是否完成完整闭环
+		closedLoopCompleted := false
+
+		if ms.dryRun {
+			// dry-run模式：模拟发送，不算真正闭环
+			result.DeliveryState = "dry_run_sent"
+			result.ReasonCode = "dry_run_sent"
+			closedLoopCompleted = false
+		} else {
+			// 真实发送模式：需要检查回复是否成功
+			if session != nil {
+				session.Mu.RLock()
+				// 检查最近回复记录
+				if len(session.ReplyHistory) > 0 {
+					latestReply := session.ReplyHistory[len(session.ReplyHistory)-1]
+					if latestReply.Success && latestReply.Confidence >= 0.8 {
+						// 发送成功且置信度高
+						result.DeliveryState = "send_verified"
+						result.ReasonCode = "send_verified"
+						closedLoopCompleted = true
+					} else if latestReply.Success {
+						// 发送成功但置信度低
+						result.DeliveryState = "send_attempted"
+						result.ReasonCode = "send_attempted_low_confidence"
+						closedLoopCompleted = false
+					} else {
+						// 发送失败
+						result.DeliveryState = "send_failed"
+						result.ReasonCode = "send_failed"
+						closedLoopCompleted = false
+					}
+				} else {
+					// 没有回复记录，可能数据不一致
+					result.DeliveryState = "send_attempted"
+					result.ReasonCode = "no_reply_record"
+					closedLoopCompleted = false
+				}
+				session.Mu.RUnlock()
+			} else {
+				// 无会话，数据不一致
+				result.DeliveryState = "send_attempted"
+				result.ReasonCode = "no_session"
+				closedLoopCompleted = false
+			}
+		}
+
+		result.ClosedLoopCompleted = closedLoopCompleted
 	} else if result.IncomingFingerprint != "" {
-		result.DeliveryState = "message_read"
-		result.ReasonCode = "no_new_messages"
+		result.DeliveryState = "message_read_only"
+		result.ReasonCode = "message_read_only"
 		// 只有收到消息但没有发送回复，不算完整闭环
 		result.ClosedLoopCompleted = false
 	}

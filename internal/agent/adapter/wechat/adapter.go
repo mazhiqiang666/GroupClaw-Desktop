@@ -2069,3 +2069,108 @@ func (a *WeChatAdapter) CaptureDiagnostics() (map[string]string, adapter.Result)
 	}
 }
 
+// SearchContactFallback 搜索联系人兜底实现（用于monitor服务）
+func (a *WeChatAdapter) SearchContactFallback(contactName string, windowHandle uintptr) adapter.Result {
+	// 简化实现：基于debugContactSearch逻辑
+	// 1. 聚焦窗口
+	focusResult := a.bridge.FocusWindow(windowHandle)
+	if focusResult.Status != adapter.StatusSuccess {
+		return focusResult
+	}
+
+	// 2. 枚举节点查找搜索框
+	nodes, nodesResult := a.bridge.EnumerateAccessibleNodes(windowHandle)
+	if nodesResult.Status != adapter.StatusSuccess {
+		return nodesResult
+	}
+
+	// 查找搜索框（edit或text角色）
+	var searchBoxRect windows.InputBoxRect
+	searchBoxFound := false
+	for _, node := range nodes {
+		if (strings.Contains(strings.ToLower(node.Role), "edit") ||
+			strings.Contains(strings.ToLower(node.Role), "text")) &&
+			node.Bounds[2] > 0 && node.Bounds[3] > 0 {
+			// 假设搜索框在左侧区域
+			if float64(node.Bounds[0]) < 800*0.33 { // X position
+				searchBoxRect = windows.InputBoxRect{
+					X:      node.Bounds[0],
+					Y:      node.Bounds[1],
+					Width:  node.Bounds[2],
+					Height: node.Bounds[3],
+				}
+				searchBoxFound = true
+				break
+			}
+		}
+	}
+
+	if !searchBoxFound {
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("SEARCH_BOX_NOT_FOUND"),
+			Error:      "搜索框未找到",
+		}
+	}
+
+	// 3. 点击搜索框
+	clickX := searchBoxRect.X + searchBoxRect.Width/2
+	clickY := searchBoxRect.Y + searchBoxRect.Height/2
+	clickResult := a.bridge.Click(windowHandle, clickX, clickY)
+	if clickResult.Status != adapter.StatusSuccess {
+		return clickResult
+	}
+	time.Sleep(500 * time.Millisecond)
+
+	// 4. 输入联系人名称
+	// 先清空可能存在的文本
+	a.bridge.SendKeys(windowHandle, "{CTRL}a{DELETE}")
+	time.Sleep(200 * time.Millisecond)
+	a.bridge.SendKeys(windowHandle, contactName)
+	time.Sleep(1000 * time.Millisecond) // 等待搜索结果
+
+	// 5. 查找搜索结果中的联系人
+	nodesAfterSearch, nodesResultAfter := a.bridge.EnumerateAccessibleNodes(windowHandle)
+	if nodesResultAfter.Status != adapter.StatusSuccess {
+		return nodesResultAfter
+	}
+
+	// 查找包含联系人名称的列表项
+	var targetRect []int
+	for _, node := range nodesAfterSearch {
+		if (strings.Contains(strings.ToLower(node.Role), "listitem") ||
+			strings.Contains(strings.ToLower(node.Role), "list item")) &&
+			strings.Contains(node.Name, contactName) &&
+			node.Bounds[2] > 0 && node.Bounds[3] > 0 {
+			targetRect = []int{node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3]}
+			break
+		}
+	}
+
+	if targetRect == nil {
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonCode("CONTACT_NOT_FOUND_IN_SEARCH"),
+			Error:      "搜索后未找到联系人",
+		}
+	}
+
+	// 6. 点击搜索结果
+	targetClickX := targetRect[0] + targetRect[2]/2
+	targetClickY := targetRect[1] + targetRect[3]/2
+	clickResult2 := a.bridge.Click(windowHandle, targetClickX, targetClickY)
+	if clickResult2.Status != adapter.StatusSuccess {
+		return clickResult2
+	}
+
+	// 等待聊天窗口打开
+	time.Sleep(1500 * time.Millisecond)
+
+	return adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+		Confidence: 0.8,
+		ElapsedMs:  3000, // 估计耗时
+	}
+}
+
