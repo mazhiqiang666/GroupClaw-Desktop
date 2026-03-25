@@ -866,6 +866,8 @@ type StageBTextInjection struct {
 	InputPreviewDetected   bool
 	BeforeScreenshot       []byte
 	AfterPasteScreenshot   []byte
+	WeakSignals            []string // 弱信号列表
+	StrongSignals          []string // 强信号列表
 	Diagnostics            []adapter.Diagnostic
 }
 
@@ -886,6 +888,8 @@ type StageDSendVerification struct {
 	ChatAreaChanged      bool
 	InputClearedAfterSend bool
 	SendVerified         bool
+	WeakSignals          []string // 弱信号列表
+	StrongSignals        []string // 强信号列表
 	Diagnostics          []adapter.Diagnostic
 }
 
@@ -1190,8 +1194,6 @@ func (a *WeChatAdapter) stageBTextInjection(conv protocol.ConversationRef, conte
 	}
 	time.Sleep(50 * time.Millisecond)
 
-	result.TextInjectionSuccess = true
-
 	// 截图输入框点击后
 	afterScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
 	result.AfterPasteScreenshot = afterScreenshot
@@ -1201,6 +1203,29 @@ func (a *WeChatAdapter) stageBTextInjection(conv protocol.ConversationRef, conte
 		stageA.WindowWidth, stageA.WindowHeight, stageA.InputBoxRect)
 	result.InputAreaChanged = diff > 0.01
 	result.InputPreviewDetected = result.InputAreaChanged
+
+	// 添加弱信号和强信号检测
+	// 弱信号：输入区域变化 > 1%
+	if diff > 0.01 {
+		weakSignal := fmt.Sprintf("input_area_changed:%.3f", diff)
+		result.WeakSignals = append(result.WeakSignals, weakSignal)
+	}
+
+	// 强信号：输入区域变化 > 5%（显著视觉变化）
+	if diff > 0.05 {
+		strongSignal := fmt.Sprintf("significant_input_change:%.3f", diff)
+		result.StrongSignals = append(result.StrongSignals, strongSignal)
+	}
+
+	// 强信号：输入预览检测（文本出现在输入框中）
+	// 由于无法使用OCR，我们使用视觉变化作为代理指标
+	if result.InputPreviewDetected && diff > 0.03 {
+		strongSignal := "input_preview_detected"
+		result.StrongSignals = append(result.StrongSignals, strongSignal)
+	}
+
+	// 成功判定：需要至少1个强信号
+	result.TextInjectionSuccess = len(result.StrongSignals) > 0
 
 	result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
 		Timestamp: time.Now(),
@@ -1216,6 +1241,8 @@ func (a *WeChatAdapter) stageBTextInjection(conv protocol.ConversationRef, conte
 			"input_area_changed":       strconv.FormatBool(result.InputAreaChanged),
 			"input_preview_detected":   strconv.FormatBool(result.InputPreviewDetected),
 			"area_diff":                fmt.Sprintf("%.3f", diff),
+			"weak_signals_count":       strconv.Itoa(len(result.WeakSignals)),
+			"strong_signals_count":     strconv.Itoa(len(result.StrongSignals)),
 		},
 	})
 
@@ -1313,7 +1340,37 @@ func (a *WeChatAdapter) stageDSendVerification(conv protocol.ConversationRef, co
 
 	result.ChatAreaChanged = messageEvidence.NewMessageNodes > 0
 	result.InputClearedAfterSend = true // 假设输入框已清空
-	result.SendVerified = result.ChatAreaChanged && result.InputClearedAfterSend && assessment.Confidence > 0.5
+
+	// 添加弱信号和强信号检测
+	// 弱信号：聊天区域变化
+	if result.ChatAreaChanged {
+		weakSignal := fmt.Sprintf("chat_area_changed:%d_nodes", messageEvidence.NewMessageNodes)
+		result.WeakSignals = append(result.WeakSignals, weakSignal)
+	}
+
+	// 弱信号：输入框已清空
+	if result.InputClearedAfterSend {
+		weakSignal := "input_cleared_after_send"
+		result.WeakSignals = append(result.WeakSignals, weakSignal)
+	}
+
+	// 强信号：新消息节点检测（消息落地证据）
+	if messageEvidence.NewMessageNodes > 0 {
+		strongSignal := fmt.Sprintf("new_message_detected:%d_nodes", messageEvidence.NewMessageNodes)
+		result.StrongSignals = append(result.StrongSignals, strongSignal)
+	}
+
+	// 强信号：消息内容验证（通过视觉检测）
+	if assessment.Confidence > 0.8 {
+		strongSignal := fmt.Sprintf("message_verified_confidence:%.2f", assessment.Confidence)
+		result.StrongSignals = append(result.StrongSignals, strongSignal)
+	}
+
+	// 成功判定：需要所有必要条件 + 至少1个强信号
+	result.SendVerified = result.ChatAreaChanged &&
+		result.InputClearedAfterSend &&
+		assessment.Confidence > 0.5 &&
+		len(result.StrongSignals) > 0
 
 	if result.SendVerified {
 		result.ReasonCode = adapter.ReasonSendVerified
@@ -1333,6 +1390,8 @@ func (a *WeChatAdapter) stageDSendVerification(conv protocol.ConversationRef, co
 			"send_verified":            strconv.FormatBool(result.SendVerified),
 			"confidence":               fmt.Sprintf("%.2f", assessment.Confidence),
 			"new_message_nodes":        strconv.Itoa(messageEvidence.NewMessageNodes),
+			"weak_signals_count":       strconv.Itoa(len(result.WeakSignals)),
+			"strong_signals_count":     strconv.Itoa(len(result.StrongSignals)),
 		},
 	})
 
