@@ -908,9 +908,8 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	// 阶段A: 输入框定位
 	stageA := a.stageAInputBoxPositioning(conv, taskID)
 
-	// 允许 Stage A 非 confirmed 时继续执行 Stage B
-	// 只有在完全失败（无候选、探测失败）时才返回
-	if stageA.Failed && stageA.ReasonCode != adapter.ReasonInputBoxNotConfident {
+	// Stage A 只在完全失败（无候选、探测失败）时返回
+	if stageA.Failed {
 		return adapter.Result{
 			Status:      adapter.StatusFailed,
 			ReasonCode:  stageA.ReasonCode,
