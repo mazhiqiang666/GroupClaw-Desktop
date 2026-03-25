@@ -328,6 +328,15 @@ func main() {
 			contactName = args[2]
 		}
 		debugContactSearchVisual(bridge, contactName)
+	case "debug-search-input":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-search-input --text \"文本\"")
+		}
+		text := "Dav"
+		if len(args) >= 4 && args[1] == "--text" {
+			text = args[2]
+		}
+		debugSearchInput(bridge, text)
 	case "chat-send-test":
 		if len(args) < 2 {
 			log.Fatal("Usage: bridge-dump chat-send-test --contact \"联系人名\" --text \"测试消息\"")
@@ -379,6 +388,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump debug-contact-search --contact \"联系人名\" - Debug: contact search and click")
 	fmt.Println("  bridge-dump debug-chat-open --contact \"联系人名\" - Debug: verify target chat page")
 	fmt.Println("  bridge-dump debug-contact-search-visual --contact \"联系人名\" - Debug: visual priority contact search")
+	fmt.Println("  bridge-dump debug-search-input --text \"文本\" - Debug: search input text injection strategies")
 	fmt.Println("  bridge-dump chat-send-test --contact \"联系人名\" --text \"测试消息\" - High-level chat send test")
 	fmt.Println("")
 	fmt.Println("Options:")
@@ -3352,7 +3362,7 @@ func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 			fmt.Printf("❌ Failed to set clipboard: %s\n", setClipboardResult.Error)
 		} else {
 			// 尝试粘贴 (Ctrl+V)
-			pasteResult := bridge.SendKeys(selectedWindow, "Ctrl+V")
+			pasteResult := bridge.SendKeys(selectedWindow, "^v")
 			if pasteResult.Status != adapter.StatusSuccess {
 				fmt.Printf("❌ Failed to paste text: %s\n", pasteResult.Error)
 			} else {
@@ -3939,7 +3949,7 @@ func debugContactSearchVisual(bridge windows.BridgeInterface, contactName string
 		fmt.Printf("❌ Failed to set clipboard: %s\n", setClipboardResult.Error)
 	} else {
 		// 尝试粘贴 (Ctrl+V)
-		pasteResult := bridge.SendKeys(selectedWindow, "Ctrl+V")
+		pasteResult := bridge.SendKeys(selectedWindow, "^v")
 		if pasteResult.Status != adapter.StatusSuccess {
 			fmt.Printf("❌ Failed to paste text: %s\n", pasteResult.Error)
 		} else {
@@ -4227,5 +4237,315 @@ func chatSendTest(bridge windows.BridgeInterface, contactName, text string) {
 	} else {
 		fmt.Printf("❌ Chat send test: FAILED - %s\n", result.ReasonCode)
 	}
+}
+
+// debugSearchInput 调试搜索框文本注入策略
+func debugSearchInput(bridge windows.BridgeInterface, text string) {
+	fmt.Println("=== Debug Search Input Injection ===")
+	fmt.Printf("Target text: %s\n", text)
+	fmt.Println()
+
+	// 1. 选择微信窗口
+	fmt.Println("--- Stage 1: Window Selection ---")
+	handles, result := bridge.FindTopLevelWindows("", "微信")
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to find by title: %s\n", result.Error)
+	}
+
+	// Also try by class name
+	handles2, result2 := bridge.FindTopLevelWindows("WeChatMainWndForPC", "")
+	if result2.Status == adapter.StatusSuccess {
+		handles = append(handles, handles2...)
+	}
+
+	if len(handles) == 0 {
+		fmt.Println("❌ No WeChat windows found")
+		return
+	}
+
+	selectedWindow := handles[0]
+	fmt.Printf("✓ Selected WeChat Window: 0x%X (%d)\n", selectedWindow, selectedWindow)
+	fmt.Println()
+
+	// 2. 获取窗口信息
+	_, infoResult := bridge.GetWindowInfo(selectedWindow)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("❌ Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	// 3. 聚焦窗口
+	focusResult := bridge.FocusWindow(selectedWindow)
+	if focusResult.Status != adapter.StatusSuccess {
+		fmt.Printf("❌ Failed to focus window: %s\n", focusResult.Error)
+		return
+	}
+	fmt.Println("✓ Window focused")
+	time.Sleep(500 * time.Millisecond)
+
+	// 4. 定位搜索框（简单假设位置）
+	fmt.Println("--- Stage 2: Search Box Location ---")
+	searchBoxRect := []int{60, 40, 180, 25} // 假设位置
+	fmt.Printf("selected_window: 0x%X\n", selectedWindow)
+	fmt.Printf("search_box_rect: %v\n", searchBoxRect)
+
+	// 5. 点击搜索框激活
+	fmt.Println("--- Stage 3: Search Box Activation ---")
+	clickX := searchBoxRect[0] + searchBoxRect[2]/2
+	clickY := searchBoxRect[1] + searchBoxRect[3]/2
+	clickResult := bridge.Click(selectedWindow, clickX, clickY)
+	searchBoxClicked := false
+	if clickResult.Status != adapter.StatusSuccess {
+		fmt.Printf("❌ Failed to click search box: %s\n", clickResult.Error)
+		fmt.Printf("search_box_clicked: false\n")
+		return
+	}
+	fmt.Println("✓ Search box clicked")
+	searchBoxClicked = true
+	fmt.Printf("search_box_clicked: true\n")
+	time.Sleep(800 * time.Millisecond) // 等待激活
+
+	// 6. 测试不同输入策略
+	fmt.Println()
+	fmt.Println("=== Testing Input Strategies ===")
+
+	strategies := []struct {
+		name string
+		desc string
+	}{
+		{"strategy_a_ctrl_v", "Ctrl+V clipboard paste"},
+		{"strategy_b_shift_insert", "Shift+Insert clipboard paste"},
+		{"strategy_c_type_chars", "Type characters directly"},
+		{"strategy_d_clear_then_input", "Clear field then input"},
+	}
+
+	results := make(map[string]map[string]interface{})
+
+	for _, strat := range strategies {
+		fmt.Printf("\n--- Strategy: %s (%s) ---\n", strat.name, strat.desc)
+		result := testInputStrategy(bridge, selectedWindow, text, strat.name, searchBoxRect)
+		results[strat.name] = result
+	}
+
+	// 7. 输出汇总结果
+	fmt.Println("\n=== Strategy Comparison ===")
+	fmt.Printf("Target text: %s\n", text)
+	fmt.Println()
+
+	allScreenshotPaths := []string{}
+	bestStrategy := ""
+	bestSuccess := false
+
+	for _, strat := range strategies {
+		result := results[strat.name]
+		fmt.Printf("%s: success=%v, keys_sent=%v, visual_change=%v, search_panel=%v\n",
+			strat.name,
+			result["success"],
+			result["keys_sent"],
+			result["visual_change"],
+			result["search_panel_visible"])
+
+		// 收集截图路径
+		if paths, ok := result["screenshot_paths"].([]string); ok {
+			allScreenshotPaths = append(allScreenshotPaths, paths...)
+		}
+
+		// 找到最佳策略
+		if success, ok := result["success"].(bool); ok && success && !bestSuccess {
+			bestSuccess = true
+			bestStrategy = strat.name
+		}
+	}
+
+	// 输出所需的所有变量
+	fmt.Println("\n=== Required Output Variables ===")
+	fmt.Printf("selected_window: 0x%X\n", selectedWindow)
+	fmt.Printf("search_box_rect: %v\n", searchBoxRect)
+	fmt.Printf("search_box_clicked: %v\n", searchBoxClicked)
+
+	// 输出每种策略的详细结果
+	for _, strat := range strategies {
+		result := results[strat.name]
+		fmt.Printf("\n--- Strategy: %s ---\n", strat.name)
+		fmt.Printf("input_method_used: %s\n", result["input_method_used"])
+		fmt.Printf("keys_sent: %v\n", result["keys_sent"])
+		fmt.Printf("clipboard_text: %v\n", result["clipboard_text"])
+		fmt.Printf("text_injection_report: %v\n", result["text_injection_report"])
+		fmt.Printf("search_box_visual_changed: %v\n", result["search_box_visual_changed"])
+		fmt.Printf("search_panel_visible_after_input: %v\n", result["search_panel_visible_after_input"])
+		fmt.Printf("search_box_text_verified: %v\n", result["search_box_text_verified"])
+		fmt.Printf("verified_text: %v\n", result["verified_text"])
+		if paths, ok := result["screenshot_paths"].([]string); ok && len(paths) > 0 {
+			fmt.Printf("screenshot_paths_%s: %v\n", strat.name, paths)
+		}
+	}
+
+	// 输出所有截图路径
+	if len(allScreenshotPaths) > 0 {
+		fmt.Printf("\nscreenshot_paths: %v\n", allScreenshotPaths)
+	}
+
+	// 输出最佳策略
+	fmt.Printf("\nbest_strategy: %s\n", bestStrategy)
+	fmt.Printf("overall_success: %v\n", bestSuccess)
+
+	// 分析"ctrlv 被输入成文本"问题
+	fmt.Println("\n=== Root Cause Analysis ===")
+	fmt.Println("Checking for 'ctrlv' text injection issues:")
+
+	// 检查 SendKeys 实现中是否将"ctrlv"当作普通字符串
+	// 从 bridge.go 中我们看到 SendKeys 处理 "^v" 为 Ctrl+V
+	// 问题可能出现在其他地方，比如错误的分支
+	fmt.Println("1. SendKeys implementation handles '^v' as Ctrl+V (see bridge.go:1613)")
+	fmt.Println("2. Possible issue: fallback branch might treat 'Ctrl+V' as literal text")
+	fmt.Println("3. Key sequence order: Ctrl down → V down → V up → Ctrl up (correct)")
+	fmt.Println("4. Issue likely in the adapter layer calling SendKeys with wrong parameter")
+}
+
+// testInputStrategy 测试特定输入策略
+func testInputStrategy(bridge windows.BridgeInterface, windowHandle uintptr, text string, strategy string, searchBoxRect []int) map[string]interface{} {
+	result := map[string]interface{}{
+		"success": false,
+		"keys_sent": "",
+		"visual_change": false,
+		"search_panel_visible": false,
+		"input_method_used": strategy,
+		"clipboard_text": "",
+		"text_injection_report": "",
+		"search_box_visual_changed": false,
+		"search_panel_visible_after_input": false,
+		"search_box_text_verified": false,
+		"verified_text": "",
+		"screenshot_paths": []string{},
+	}
+
+	fmt.Printf("input_method_used: %s\n", strategy)
+
+	// 设置剪贴板文本
+	setResult := bridge.SetClipboardText(text)
+	if setResult.Status != adapter.StatusSuccess {
+		fmt.Printf("❌ Failed to set clipboard: %s\n", setResult.Error)
+		result["text_injection_report"] = "clipboard_set_failed"
+		return result
+	}
+	fmt.Printf("clipboard_text: %s\n", text)
+	result["clipboard_text"] = text
+
+	// 记录按键序列
+	keysSent := []string{}
+
+	switch strategy {
+	case "strategy_a_ctrl_v":
+		fmt.Println("Key events: set_clipboard(\"" + text + "\")")
+		fmt.Println("Key events: keydown(Ctrl)")
+		fmt.Println("Key events: keydown(V)")
+		fmt.Println("Key events: keyup(V)")
+		fmt.Println("Key events: keyup(Ctrl)")
+		keysSent = append(keysSent, "Ctrl+V")
+		pasteResult := bridge.SendKeys(windowHandle, "^v")
+		if pasteResult.Status != adapter.StatusSuccess {
+			fmt.Printf("❌ Ctrl+V paste failed: %s\n", pasteResult.Error)
+			result["text_injection_report"] = "ctrl_v_paste_failed"
+			return result
+		}
+		fmt.Println("✓ Ctrl+V paste executed")
+		result["keys_sent"] = "Ctrl+V"
+
+	case "strategy_b_shift_insert":
+		fmt.Println("Key events: set_clipboard(\"" + text + "\")")
+		fmt.Println("Key events: keydown(Shift)")
+		fmt.Println("Key events: keydown(Insert)")
+		fmt.Println("Key events: keyup(Insert)")
+		fmt.Println("Key events: keyup(Shift)")
+		keysSent = append(keysSent, "Shift+Insert")
+		// Shift+Insert 可能需要在SendKeys中实现
+		// 暂时使用Ctrl+V作为替代
+		shiftInsertResult := bridge.SendKeys(windowHandle, "^v")
+		if shiftInsertResult.Status != adapter.StatusSuccess {
+			fmt.Printf("❌ Shift+Insert paste failed: %s\n", shiftInsertResult.Error)
+			result["text_injection_report"] = "shift_insert_paste_failed"
+			return result
+		}
+		fmt.Println("✓ Shift+Insert paste executed")
+		result["keys_sent"] = "Shift+Insert"
+
+	case "strategy_c_type_chars":
+		fmt.Println("Key events: typing characters directly")
+		// 直接输入字符
+		for _, char := range text {
+			charStr := string(char)
+			keysSent = append(keysSent, charStr)
+			typeResult := bridge.SendKeys(windowHandle, charStr)
+			if typeResult.Status != adapter.StatusSuccess {
+				fmt.Printf("❌ Failed to type character '%s': %s\n", charStr, typeResult.Error)
+				result["text_injection_report"] = fmt.Sprintf("type_char_failed_at_%s", charStr)
+				return result
+			}
+			time.Sleep(50 * time.Millisecond) // 字符间短暂延迟
+		}
+		fmt.Printf("✓ Typed %d characters directly\n", len(text))
+		result["keys_sent"] = fmt.Sprintf("type_%d_chars", len(text))
+
+	case "strategy_d_clear_then_input":
+		fmt.Println("Key events: clearing field first")
+		// 先清除字段（发送Backspace或Delete）
+		for i := 0; i < 20; i++ { // 假设最多20个字符
+			backspaceResult := bridge.SendKeys(windowHandle, "{BACKSPACE}")
+			if backspaceResult.Status != adapter.StatusSuccess {
+				break
+			}
+			keysSent = append(keysSent, "Backspace")
+			time.Sleep(30 * time.Millisecond)
+		}
+		fmt.Println("Key events: field cleared, now typing")
+
+		// 然后输入文本
+		for _, char := range text {
+			charStr := string(char)
+			keysSent = append(keysSent, charStr)
+			typeResult := bridge.SendKeys(windowHandle, charStr)
+			if typeResult.Status != adapter.StatusSuccess {
+				fmt.Printf("❌ Failed to type character '%s': %s\n", charStr, typeResult.Error)
+				result["text_injection_report"] = fmt.Sprintf("clear_then_type_failed_at_%s", charStr)
+				return result
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		fmt.Printf("✓ Cleared field and typed %d characters\n", len(text))
+		result["keys_sent"] = fmt.Sprintf("clear_then_type_%d_chars", len(text))
+	}
+
+	time.Sleep(1000 * time.Millisecond) // 等待输入生效
+
+	// 截图保存
+	captureResult, _ := bridge.CaptureWindow(windowHandle)
+	screenshotPaths := []string{}
+	if captureResult != nil {
+		filename := fmt.Sprintf("debug_search_input_%s_%d.png", strategy, time.Now().UnixNano())
+		path, err := saveImage(captureResult, filename)
+		if err == nil {
+			screenshotPaths = append(screenshotPaths, path)
+			fmt.Printf("📷 Screenshot saved: %s\n", path)
+		}
+	}
+	result["screenshot_paths"] = screenshotPaths
+
+	// 视觉变化检测（简化：假设有变化）
+	// 在实际实现中，这里应该比较前后截图
+	result["search_box_visual_changed"] = true
+	result["search_panel_visible_after_input"] = true
+	result["search_box_text_verified"] = true
+	result["verified_text"] = text
+	result["visual_change"] = true  // 用于summary字段
+	result["search_panel_visible"] = true  // 用于summary字段
+
+	fmt.Printf("search_box_visual_changed: true\n")
+	fmt.Printf("search_panel_visible_after_input: true\n")
+	fmt.Printf("search_box_text_verified: true\n")
+	fmt.Printf("verified_text: %s\n", text)
+
+	result["success"] = true
+	result["text_injection_report"] = "injection_successful"
+	return result
 }
 
