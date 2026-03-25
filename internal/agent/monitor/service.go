@@ -223,8 +223,8 @@ func (ms *MonitorService) monitorCycle() {
 	if len(processedContacts) > 0 {
 		log.Printf("[MONITOR] poll_round=%d, stage=summary_report, processed_contacts=%d", round, len(processedContacts))
 		for _, result := range processedContacts {
-			log.Printf("[MONITOR] poll_round=%d, contact=%s, incoming_fingerprint=%s, reply_fingerprint=%s, delivery_state=%s, reason_code=%s",
-				round, result.ContactName, result.IncomingFingerprint, result.ReplyFingerprint, result.DeliveryState, result.ReasonCode)
+			log.Printf("[MONITOR] poll_round=%d, contact=%s, incoming_fingerprint=%s, reply_fingerprint=%s, delivery_state=%s, reason_code=%s, closed_loop_completed=%t",
+				round, result.ContactName, result.IncomingFingerprint, result.ReplyFingerprint, result.DeliveryState, result.ReasonCode, result.ClosedLoopCompleted)
 		}
 	}
 }
@@ -288,7 +288,7 @@ func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) 
 	}
 
 	// 步骤3: 读取新增消息
-	messages, err := ms.readNewMessages(convRef, contact.ID)
+	messages, err := ms.readNewMessages(convRef, contact.ID, pollRound)
 	if err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=message_read, reason=read_failed, error=%v", pollRound, err)
 		return fmt.Errorf("读取消息失败: %v", err)
@@ -369,7 +369,7 @@ func (ms *MonitorService) openContact(contact ContactInfo) (protocol.Conversatio
 }
 
 // readNewMessages 读取新增消息（步骤3）
-func (ms *MonitorService) readNewMessages(convRef protocol.ConversationRef, contactID string) ([]session.Message, error) {
+func (ms *MonitorService) readNewMessages(convRef protocol.ConversationRef, contactID, pollRound string) ([]session.Message, error) {
 	log.Printf("步骤3: 读取新增消息")
 
 	// 读取最新消息
@@ -380,9 +380,30 @@ func (ms *MonitorService) readNewMessages(convRef protocol.ConversationRef, cont
 
 	// 获取会话以过滤新消息
 	session := ms.sessionMgr.Get(contactID)
+
+	// 输出最后可见消息预览
+	var lastVisibleMessagePreview string
+	if len(messages) > 0 {
+		lastMsg := messages[len(messages)-1]
+		if len(lastMsg.NormalizedText) > 50 {
+			lastVisibleMessagePreview = lastMsg.NormalizedText[:50] + "..."
+		} else {
+			lastVisibleMessagePreview = lastMsg.NormalizedText
+		}
+	}
+	log.Printf("[MONITOR] poll_round=%s, stage=message_read, last_visible_message_preview=%s",
+		pollRound, lastVisibleMessagePreview)
+
 	if session == nil {
 		// 如果没有会话，所有消息都是新的
-		return convertToSessionMessages(messages, contactID), nil
+		newMessages := convertToSessionMessages(messages, contactID)
+		log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_message_candidates=%d, is_duplicate_message=false, reason=no_session",
+			pollRound, len(newMessages))
+		if len(newMessages) > 0 {
+			log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_message_fingerprint=%s, message_selected_for_reply=%t",
+				pollRound, newMessages[0].Fingerprint, len(newMessages) > 0)
+		}
+		return newMessages, nil
 	}
 
 	// 过滤出新消息（根据最后读取的消息ID）
@@ -390,7 +411,35 @@ func (ms *MonitorService) readNewMessages(convRef protocol.ConversationRef, cont
 	lastMessageID := session.LastMessageID
 	session.Mu.RUnlock()
 
-	return filterNewMessages(messages, lastMessageID, contactID), nil
+	newMessages := filterNewMessages(messages, lastMessageID, contactID)
+
+	// 输出新消息识别详情
+	log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_message_candidates=%d", pollRound, len(newMessages))
+
+	if len(newMessages) > 0 {
+		// 检查是否重复消息
+		isDuplicate := false
+		if session.LastProcessedIncomingFingerprint != "" {
+			for _, msg := range newMessages {
+				if msg.Fingerprint == session.LastProcessedIncomingFingerprint {
+					isDuplicate = true
+					break
+				}
+			}
+		}
+
+		log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_message_fingerprint=%s, is_duplicate_message=%t, message_selected_for_reply=%t",
+			pollRound, newMessages[0].Fingerprint, isDuplicate, !isDuplicate && len(newMessages) > 0)
+
+		// 如果发现重复消息，清空新消息列表以避免重复处理
+		if isDuplicate {
+			log.Printf("[MONITOR] poll_round=%s, stage=message_read, reason=duplicate_message_filtered, duplicate_fingerprint=%s",
+				pollRound, session.LastProcessedIncomingFingerprint)
+			return nil, nil
+		}
+	}
+
+	return newMessages, nil
 }
 
 // updateSessionWithMessages 更新会话消息（步骤4）
@@ -609,15 +658,17 @@ type ContactProcessingResult struct {
 	ReplyFingerprint     string
 	DeliveryState        string
 	ReasonCode           string
+	ClosedLoopCompleted  bool
 }
 
 // processContactWithResult 处理单个联系人并返回结果
 func (ms *MonitorService) processContactWithResult(contact ContactInfo, pollRound string) ContactProcessingResult {
 	result := ContactProcessingResult{
-		ContactName:  contact.Name,
-		Error:        nil,
-		DeliveryState: "unknown",
-		ReasonCode:   "not_processed",
+		ContactName:         contact.Name,
+		Error:               nil,
+		DeliveryState:       "unknown",
+		ReasonCode:          "not_processed",
+		ClosedLoopCompleted: false,
 	}
 
 	// 调用现有的processContact函数
@@ -640,9 +691,13 @@ func (ms *MonitorService) processContactWithResult(contact ContactInfo, pollRoun
 	if result.ReplyFingerprint != "" {
 		result.DeliveryState = "sent"
 		result.ReasonCode = "reply_sent"
+		// 有回复指纹表示完成了完整闭环（收到消息并发送回复）
+		result.ClosedLoopCompleted = true
 	} else if result.IncomingFingerprint != "" {
 		result.DeliveryState = "message_read"
 		result.ReasonCode = "no_new_messages"
+		// 只有收到消息但没有发送回复，不算完整闭环
+		result.ClosedLoopCompleted = false
 	}
 
 	return result
