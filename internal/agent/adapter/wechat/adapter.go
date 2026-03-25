@@ -2122,11 +2122,11 @@ func (a *WeChatAdapter) SearchContactFallback(contactName string, windowHandle u
 	}
 	time.Sleep(500 * time.Millisecond)
 
-	// 4. 输入联系人名称
-	// 先清空可能存在的文本
-	a.bridge.SendKeys(windowHandle, "{CTRL}a{DELETE}")
-	time.Sleep(200 * time.Millisecond)
-	a.bridge.SendKeys(windowHandle, contactName)
+	// 4. 输入联系人名称（使用统一的InjectSearchText）
+	injectResult := a.InjectSearchText(windowHandle, contactName, "clear_then_type_chars")
+	if injectResult.Status != adapter.StatusSuccess {
+		return injectResult
+	}
 	time.Sleep(1000 * time.Millisecond) // 等待搜索结果
 
 	// 5. 查找搜索结果中的联系人

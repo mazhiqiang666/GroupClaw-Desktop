@@ -224,8 +224,8 @@ func (ms *MonitorService) monitorCycle() {
 	if len(processedContacts) > 0 {
 		log.Printf("[MONITOR] poll_round=%d, stage=summary_report, processed_contacts=%d", round, len(processedContacts))
 		for _, result := range processedContacts {
-			log.Printf("[MONITOR] poll_round=%d, contact=%s, incoming_fingerprint=%s, reply_fingerprint=%s, delivery_state=%s, reason_code=%s, closed_loop_completed=%t",
-				round, result.ContactName, result.IncomingFingerprint, result.ReplyFingerprint, result.DeliveryState, result.ReasonCode, result.ClosedLoopCompleted)
+			log.Printf("[MONITOR] poll_round=%d, contact=%s, incoming_fingerprint=%s, reply_fingerprint=%s, delivery_state=%s, reason_code=%s, closed_loop_completed=%t, contact_identity_source=%s",
+				round, result.ContactName, result.IncomingFingerprint, result.ReplyFingerprint, result.DeliveryState, result.ReasonCode, result.ClosedLoopCompleted, result.ContactIdentitySource)
 		}
 	}
 }
@@ -271,15 +271,15 @@ func (ms *MonitorService) filterUnreadContacts(contacts []ContactInfo) []Contact
 }
 
 // processContact 处理单个联系人（步骤2-8）
-func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) error {
+func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) (string, error) {
 	log.Printf("[MONITOR] poll_round=%s, stage=contact_selected, selected_contact=%s, unread_count=%d",
 		pollRound, contact.Name, contact.UnreadCount)
 
 	// 步骤2: 打开有新消息的联系人
-	convRef, err := ms.openContact(contact)
+	convRef, identitySource, err := ms.openContact(contact)
 	if err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=chat_open, reason=open_failed, error=%v", pollRound, err)
-		return fmt.Errorf("打开联系人失败: %v", err)
+		return "", fmt.Errorf("打开联系人失败: %v", err)
 	}
 	log.Printf("[MONITOR] poll_round=%s, stage=chat_open, chat_open_verified=true", pollRound)
 
@@ -292,12 +292,12 @@ func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) 
 	messages, err := ms.readNewMessages(convRef, contact.ID, pollRound)
 	if err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=message_read, reason=read_failed, error=%v", pollRound, err)
-		return fmt.Errorf("读取消息失败: %v", err)
+		return identitySource, fmt.Errorf("读取消息失败: %v", err)
 	}
 
 	if len(messages) == 0 {
 		log.Printf("[MONITOR] poll_round=%s, stage=message_read, reason=no_new_messages", pollRound)
-		return nil
+		return identitySource, nil
 	}
 
 	log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_messages_count=%d", pollRound, len(messages))
@@ -305,7 +305,7 @@ func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) 
 	// 步骤4: 更新该联系人的session
 	if err := ms.updateSessionWithMessages(contact.ID, messages); err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=session_update, reason=message_update_failed, error=%v", pollRound, err)
-		return fmt.Errorf("更新会话失败: %v", err)
+		return identitySource, fmt.Errorf("更新会话失败: %v", err)
 	}
 	log.Printf("[MONITOR] poll_round=%s, stage=session_update, session_updated=true", pollRound)
 
@@ -313,19 +313,19 @@ func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) 
 	replyContent, err := ms.callRemoteAgent(contact.ID)
 	if err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=agent_request, reason=agent_failed, error=%v", pollRound, err)
-		return fmt.Errorf("获取回复失败: %v", err)
+		return identitySource, fmt.Errorf("获取回复失败: %v", err)
 	}
 
 	if replyContent == "" {
 		log.Printf("[MONITOR] poll_round=%s, stage=agent_request, reason=empty_reply", pollRound)
-		return nil
+		return identitySource, nil
 	}
 	log.Printf("[MONITOR] poll_round=%s, stage=agent_request, agent_reply_received=true, reply_length=%d", pollRound, len(replyContent))
 
 	// 步骤6: 确认当前聊天框仍属于该联系人
 	if err := ms.verifyCurrentChat(convRef, contact.Name); err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=chat_verify, reason=verification_failed, error=%v", pollRound, err)
-		return fmt.Errorf("验证聊天框失败: %v", err)
+		return identitySource, fmt.Errorf("验证聊天框失败: %v", err)
 	}
 	log.Printf("[MONITOR] poll_round=%s, stage=chat_verify, chat_open_verified=true", pollRound)
 
@@ -334,23 +334,23 @@ func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) 
 	sendResult, err := ms.sendReply(convRef, replyContent, taskID)
 	if err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=reply_send, reason=send_failed, error=%v", pollRound, err)
-		return fmt.Errorf("发送回复失败: %v", err)
+		return identitySource, fmt.Errorf("发送回复失败: %v", err)
 	}
 	log.Printf("[MONITOR] poll_round=%s, stage=reply_send, reply_sent=true, confidence=%.2f", pollRound, sendResult.Confidence)
 
 	// 步骤8: 更新session
 	if err := ms.updateSessionAfterReply(contact.ID, replyContent, taskID, sendResult); err != nil {
 		log.Printf("[MONITOR] poll_round=%s, stage=session_update, reason=reply_record_failed, error=%v", pollRound, err)
-		return fmt.Errorf("更新回复记录失败: %v", err)
+		return identitySource, fmt.Errorf("更新回复记录失败: %v", err)
 	}
 	log.Printf("[MONITOR] poll_round=%s, stage=session_update, session_updated=true, final_state=success", pollRound)
 
 	log.Printf("成功处理联系人 %s 的回复", contact.Name)
-	return nil
+	return identitySource, nil
 }
 
 // openContact 打开联系人（步骤2）
-func (ms *MonitorService) openContact(contact ContactInfo) (protocol.ConversationRef, error) {
+func (ms *MonitorService) openContact(contact ContactInfo) (protocol.ConversationRef, string, error) {
 	log.Printf("步骤2: 打开联系人 %s", contact.Name)
 
 	// 策略：列表优先，搜索兜底
@@ -358,7 +358,7 @@ func (ms *MonitorService) openContact(contact ContactInfo) (protocol.Conversatio
 	focusResult := ms.adapter.Focus(contact.Conversation)
 	if focusResult.Status == adapter.StatusSuccess && focusResult.Confidence >= 0.8 {
 		log.Printf("列表优先策略成功 (置信度: %.2f)", focusResult.Confidence)
-		return contact.Conversation, nil
+		return contact.Conversation, "list_visible", nil
 	}
 
 	// 搜索兜底策略
@@ -377,7 +377,7 @@ func (ms *MonitorService) openContact(contact ContactInfo) (protocol.Conversatio
 				// 实际应通过实例获取窗口句柄，这里假设contact.Conversation有效
 				log.Printf("警告：联系人引用中没有窗口句柄，使用搜索兜底可能失败")
 			} else {
-				return protocol.ConversationRef{}, fmt.Errorf("无法获取窗口句柄: %s", detectResult.Error)
+				return protocol.ConversationRef{}, "", fmt.Errorf("无法获取窗口句柄: %s", detectResult.Error)
 			}
 		}
 
@@ -385,17 +385,25 @@ func (ms *MonitorService) openContact(contact ContactInfo) (protocol.Conversatio
 		searchResult := wechatAdapter.SearchContactFallback(contact.Name, windowHandle)
 		if searchResult.Status == adapter.StatusSuccess {
 			log.Printf("搜索兜底成功 (置信度: %.2f)", searchResult.Confidence)
-			// 返回原始会话引用（可能不准确，但至少打开了聊天窗口）
-			return contact.Conversation, nil
+			// 搜索成功后创建更新的会话引用，使用真实联系人名称
+			updatedConv := protocol.ConversationRef{
+				HostWindowHandle: windowHandle,
+				AppInstance:      contact.Conversation.AppInstance,
+				DisplayName:      contact.Name, // 使用真实姓名而非占位名
+				ListPosition:     -1, // 未知位置
+				PreviewText:      "search_fallback_opened",
+				ListNeighborhoodHint: []string{"search_fallback", "contact_name:" + contact.Name},
+			}
+			return updatedConv, "search_fallback", nil
 		} else {
 			log.Printf("搜索兜底失败: %s (原因码: %s)", searchResult.Error, searchResult.ReasonCode)
-			return protocol.ConversationRef{}, fmt.Errorf("搜索兜底失败: %s", searchResult.Error)
+			return protocol.ConversationRef{}, "", fmt.Errorf("搜索兜底失败: %s", searchResult.Error)
 		}
 	}
 
 	// 适配器不支持搜索兜底
 	log.Printf("适配器不支持搜索兜底功能")
-	return protocol.ConversationRef{}, fmt.Errorf("无法打开联系人: %s (置信度: %.2f)", focusResult.Error, focusResult.Confidence)
+	return protocol.ConversationRef{}, "", fmt.Errorf("无法打开联系人: %s (置信度: %.2f)", focusResult.Error, focusResult.Confidence)
 }
 
 // readNewMessages 读取新增消息（步骤3）
@@ -705,6 +713,7 @@ type ContactProcessingResult struct {
 	DeliveryState        string
 	ReasonCode           string
 	ClosedLoopCompleted  bool
+	ContactIdentitySource string // list_visible | title_verified | search_fallback
 }
 
 // processContactWithResult 处理单个联系人并返回结果
@@ -718,7 +727,8 @@ func (ms *MonitorService) processContactWithResult(contact ContactInfo, pollRoun
 	}
 
 	// 调用现有的processContact函数
-	err := ms.processContact(contact, pollRound)
+	identitySource, err := ms.processContact(contact, pollRound)
+	result.ContactIdentitySource = identitySource
 	if err != nil {
 		result.Error = err
 		return result

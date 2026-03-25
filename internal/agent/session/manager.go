@@ -48,6 +48,9 @@ type ChatSession struct {
 	UnreadCount        int          `json:"unread_count"`
 	IsActive           bool         `json:"is_active"`
 	ConversationRef    *protocol.ConversationRef `json:"conversation_ref,omitempty"`
+	// 真实身份字段
+	StableContactID    string `json:"stable_contact_id,omitempty"`   // 稳定联系人ID（基于多维度特征）
+	DisplayContactName string `json:"display_contact_name,omitempty"` // 显示联系人名称（优先来源：左侧列表文本、聊天标题）
 	// 去重字段
 	LastProcessedIncomingFingerprint string `json:"last_processed_incoming_fingerprint"`
 	LastSentReplyFingerprint        string `json:"last_sent_reply_fingerprint"`
@@ -122,6 +125,9 @@ func (sm *SessionManager) GetOrCreate(contactID, contactName string) *ChatSessio
 		UnreadCount:     0,
 		IsActive:        false,
 		ConversationRef: nil,
+		// 真实身份字段初始化（后续可更新）
+		StableContactID:    contactID,   // 初始使用contactID，后续可更新为更稳定的ID
+		DisplayContactName: contactName, // 初始使用contactName，后续可更新为真实显示名称
 		// 去重字段初始化
 		LastProcessedIncomingFingerprint: "",
 		LastSentReplyFingerprint:        "",
