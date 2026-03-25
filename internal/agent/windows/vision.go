@@ -723,7 +723,7 @@ func (b *Bridge) DetectConversations(windowHandle uintptr) (VisionDebugResult, a
 	}
 	result.ImageSize = len(pixels)
 
-	// 获取窗口尺寸
+	// 获取窗口尺寸（逻辑坐标）
 	rect, rectResult := b.getWindowRectInternal(windowHandle)
 	if rectResult.Status != adapter.StatusSuccess {
 		result.Error = "Failed to get window dimensions"
@@ -734,19 +734,22 @@ func (b *Bridge) DetectConversations(windowHandle uintptr) (VisionDebugResult, a
 		}
 	}
 
-	width := int(rect.Right - rect.Left)
-	height := int(rect.Bottom - rect.Top)
-	result.WindowWidth = width
-	result.WindowHeight = height
+	windowWidth := int(rect.Right - rect.Left)
+	windowHeight := int(rect.Bottom - rect.Top)
 
-	if width <= 0 || height <= 0 {
-		result.Error = fmt.Sprintf("Invalid window dimensions: %dx%d", width, height)
+	if windowWidth <= 0 || windowHeight <= 0 {
+		result.Error = fmt.Sprintf("Invalid window dimensions: %dx%d", windowWidth, windowHeight)
 		return result, adapter.Result{
 			Status:     adapter.StatusFailed,
 			ReasonCode: adapter.ReasonCode("INVALID_WINDOW_DIMENSIONS"),
 			Error:      result.Error,
 		}
 	}
+
+	// 计算实际截图尺寸（处理DPI缩放）
+	width, height := calculateScreenshotDimensions(pixels, windowWidth, windowHeight)
+	result.WindowWidth = width
+	result.WindowHeight = height
 
 	// 计算行大小
 	rowSize := ((width*24 + 31) / 32) * 4
@@ -1738,18 +1741,16 @@ func (b *Bridge) FocusConversationByVision(windowHandle uintptr, strategy string
 // DetectInputBoxArea 检测输入框区域（返回多候选）
 // 基于窗口尺寸和左侧边栏矩形几何定位输入框，返回多个候选区域
 func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int, windowWidth, windowHeight int) ([]InputBoxCandidate, adapter.Result) {
-	// 默认值：如果检测失败，返回基于几何推测的矩形
-	defaultRect := InputBoxRect{
-		X:      leftSidebarRect[0] + leftSidebarRect[2] + 20, // 左侧边栏右侧 + 边距
-		Y:      windowHeight - 100,                           // 窗口底部向上100px
-		Width:  windowWidth - leftSidebarRect[2] - 40,        // 剩余宽度减去边距
-		Height: 80,                                           // 输入框高度约80px
-	}
-
-	// 获取窗口截图进行简单验证（可选）
+	// 获取窗口截图
 	pixels, captureResult := b.CaptureWindow(windowHandle)
 	if captureResult.Status != adapter.StatusSuccess {
 		// 截图失败，返回几何推测值
+		defaultRect := InputBoxRect{
+			X:      leftSidebarRect[0] + leftSidebarRect[2] + 20,
+			Y:      windowHeight - 100,
+			Width:  windowWidth - leftSidebarRect[2] - 40,
+			Height: 80,
+		}
 		candidate := InputBoxCandidate{
 			Index:    0,
 			Rect:     defaultRect,
@@ -1774,9 +1775,29 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 		}
 	}
 
+	// 计算实际截图尺寸（处理DPI缩放）
+	screenshotWidth, screenshotHeight := calculateScreenshotDimensions(pixels, windowWidth, windowHeight)
+
+	// 如果有DPI缩放，调整leftSidebarRect坐标
+	if screenshotWidth != windowWidth || screenshotHeight != windowHeight {
+		scaleFactor := float64(screenshotWidth) / float64(windowWidth)
+		leftSidebarRect[0] = int(float64(leftSidebarRect[0]) * scaleFactor)
+		leftSidebarRect[1] = int(float64(leftSidebarRect[1]) * scaleFactor)
+		leftSidebarRect[2] = int(float64(leftSidebarRect[2]) * scaleFactor)
+		leftSidebarRect[3] = int(float64(leftSidebarRect[3]) * scaleFactor)
+	}
+
+	// 默认值：如果检测失败，返回基于几何推测的矩形
+	defaultRect := InputBoxRect{
+		X:      leftSidebarRect[0] + leftSidebarRect[2] + 20, // 左侧边栏右侧 + 边距
+		Y:      screenshotHeight - 100,                       // 窗口底部向上100px
+		Width:  screenshotWidth - leftSidebarRect[2] - 40,    // 剩余宽度减去边距
+		Height: 80,                                           // 输入框高度约80px
+	}
+
 	// 将BGR转换为RGBA进行简单分析
-	rowSize := ((windowWidth*24 + 31) / 32) * 4
-	img, err := bgrToRGBA(pixels, windowWidth, windowHeight, rowSize)
+	rowSize := ((screenshotWidth*24 + 31) / 32) * 4
+	img, err := bgrToRGBA(pixels, screenshotWidth, screenshotHeight, rowSize)
 	if err != nil {
 		// 转换失败，返回几何推测值
 		candidate := InputBoxCandidate{
@@ -1806,8 +1827,8 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 	// 简单启发式：在窗口右下区域寻找可能的输入框
 	// 输入框通常在右侧底部，高度约60-100px，宽度占右侧区域大部分
 	rightAreaStartX := leftSidebarRect[0] + leftSidebarRect[2]
-	rightAreaWidth := windowWidth - rightAreaStartX
-	bottomAreaStartY := windowHeight - 150 // 从底部向上150px开始搜索
+	rightAreaWidth := screenshotWidth - rightAreaStartX
+	bottomAreaStartY := screenshotHeight - 150 // 从底部向上150px开始搜索
 
 	if rightAreaWidth <= 0 || bottomAreaStartY < 0 {
 		// 区域无效，返回几何推测值
@@ -1828,9 +1849,9 @@ func (b *Bridge) DetectInputBoxArea(windowHandle uintptr, leftSidebarRect [4]int
 	var candidates []candidateScore
 
 	// 扫描可能的输入框位置和尺寸
-	for y := bottomAreaStartY; y < windowHeight-40; y += 10 {
+	for y := bottomAreaStartY; y < screenshotHeight-40; y += 10 {
 		for height := 60; height <= 100; height += 10 {
-			if y+height > windowHeight {
+			if y+height > screenshotHeight {
 				continue
 			}
 			for width := rightAreaWidth / 2; width <= rightAreaWidth; width += 20 {
@@ -2143,7 +2164,7 @@ func DetectFailureIndicator(screenshot []byte, windowWidth, windowHeight int, in
 func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBoxCandidate, strategy string) (InputBoxProbeResult, adapter.Result) {
 	startTime := time.Now()
 
-	// 获取窗口尺寸
+	// 获取窗口尺寸（逻辑坐标）
 	rect, rectResult := b.getWindowRectInternal(windowHandle)
 	if rectResult.Status != adapter.StatusSuccess {
 		return InputBoxProbeResult{}, adapter.Result{
@@ -2163,6 +2184,17 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 			ReasonCode: adapter.ReasonCode("CAPTURE_FAILED"),
 			Error:      captureResult.Error,
 		}
+	}
+
+	// 计算实际截图尺寸（处理DPI缩放）
+	screenshotWidth, screenshotHeight := calculateScreenshotDimensions(beforeScreenshot, windowWidth, windowHeight)
+	if screenshotWidth != windowWidth || screenshotHeight != windowHeight {
+		// DPI缩放检测到，调整候选区域坐标
+		scaleFactor := float64(screenshotWidth) / float64(windowWidth)
+		candidate.Rect.X = int(float64(candidate.Rect.X) * scaleFactor)
+		candidate.Rect.Y = int(float64(candidate.Rect.Y) * scaleFactor)
+		candidate.Rect.Width = int(float64(candidate.Rect.Width) * scaleFactor)
+		candidate.Rect.Height = int(float64(candidate.Rect.Height) * scaleFactor)
 	}
 
 	// 获取点击坐标
@@ -2191,8 +2223,8 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 		}
 	}
 
-	// 计算视觉变化差异
-	visualDiff := CalculateRectDiffPercent(beforeScreenshot, afterScreenshot, windowWidth, windowHeight, candidate.Rect)
+	// 计算视觉变化差异（使用实际截图尺寸）
+	visualDiff := CalculateRectDiffPercent(beforeScreenshot, afterScreenshot, screenshotWidth, screenshotHeight, candidate.Rect)
 
 	// 收集激活信号
 	var activationSignals []string
@@ -2211,11 +2243,11 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 
 	// 信号2: 候选区域亮度变化（输入框激活后通常变亮）(弱信号)
 	beforeBrightness := computeRectAverageBrightness(
-		mustBGRToRGBA(beforeScreenshot, windowWidth, windowHeight),
+		mustBGRToRGBA(beforeScreenshot, screenshotWidth, screenshotHeight),
 		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
 	)
 	afterBrightness := computeRectAverageBrightness(
-		mustBGRToRGBA(afterScreenshot, windowWidth, windowHeight),
+		mustBGRToRGBA(afterScreenshot, screenshotWidth, screenshotHeight),
 		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
 	)
 	brightnessDiff := afterBrightness - beforeBrightness
@@ -2228,11 +2260,11 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 
 	// 信号3: 候选区域边缘密度变化（输入框激活后边框可能更明显）(弱信号)
 	beforeEdgeDensity := computeRectEdgeDensity(
-		mustBGRToRGBA(beforeScreenshot, windowWidth, windowHeight),
+		mustBGRToRGBA(beforeScreenshot, screenshotWidth, screenshotHeight),
 		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
 	)
 	afterEdgeDensity := computeRectEdgeDensity(
-		mustBGRToRGBA(afterScreenshot, windowWidth, windowHeight),
+		mustBGRToRGBA(afterScreenshot, screenshotWidth, screenshotHeight),
 		candidate.Rect.X, candidate.Rect.Y, candidate.Rect.Width, candidate.Rect.Height,
 	)
 	edgeDiff := afterEdgeDensity - beforeEdgeDensity
@@ -2281,12 +2313,12 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 	}
 
 	// 计算可编辑控件置信度（基于视觉特征）
-	editableConfidence = calculateEditableConfidence(candidate.Rect, beforeScreenshot, afterScreenshot, windowWidth, windowHeight)
+	editableConfidence = calculateEditableConfidence(candidate.Rect, beforeScreenshot, afterScreenshot, screenshotWidth, screenshotHeight)
 
 	// 生成调试图像
 	debugImagePath := ""
 	if len(beforeScreenshot) > 0 && len(afterScreenshot) > 0 {
-		if path, err := saveProbeDebugImage(beforeScreenshot, afterScreenshot, candidate.Rect, windowWidth, windowHeight, clickX, clickY); err == nil {
+		if path, err := saveProbeDebugImage(beforeScreenshot, afterScreenshot, candidate.Rect, screenshotWidth, screenshotHeight, clickX, clickY); err == nil {
 			debugImagePath = path
 		}
 	}
@@ -2346,6 +2378,51 @@ func mustBGRToRGBA(bgrData []byte, width, height int) *image.RGBA {
 		return image.NewRGBA(image.Rect(0, 0, width, height))
 	}
 	return img
+}
+
+// calculateScreenshotDimensions 从BGR像素数据计算实际截图尺寸
+// 处理DPI缩放导致的窗口尺寸与截图尺寸不一致的问题
+func calculateScreenshotDimensions(bgrData []byte, windowWidth, windowHeight int) (int, int) {
+	if len(bgrData) == 0 {
+		return windowWidth, windowHeight
+	}
+
+	// 尝试不同的行大小计算方式，找到匹配的尺寸
+	// 行大小必须是4字节对齐的
+	// 同时检查宽度和高度的缩放
+	for width := windowWidth; width <= windowWidth*2+100; width++ {
+		rowSize := ((width*24 + 31) / 32) * 4
+		// 尝试不同的高度（考虑高度也可能被缩放）
+		for height := windowHeight; height <= windowHeight*2+100; height++ {
+			expectedSize := rowSize * height
+			if len(bgrData) == expectedSize {
+				return width, height
+			}
+		}
+	}
+
+	// 如果找不到精确匹配，尝试从行大小推断
+	// 行大小必须是4的倍数，且每行3字节/像素
+	if len(bgrData) >= 4 {
+		// 尝试找到行大小（必须是4的倍数）
+		for rowSize := 4; rowSize <= len(bgrData); rowSize += 4 {
+			if len(bgrData)%rowSize == 0 {
+				height := len(bgrData) / rowSize
+				// 计算宽度（每行3字节/像素）
+				width := rowSize / 3
+				if width > 0 && height > 0 && width*3*height == rowSize*height {
+					// 验证宽度和高度是否合理（在窗口尺寸的0.5倍到2倍之间）
+					if width >= windowWidth/2 && width <= windowWidth*2 &&
+						height >= windowHeight/2 && height <= windowHeight*2 {
+						return width, height
+					}
+				}
+			}
+		}
+	}
+
+	// 返回窗口尺寸作为默认值
+	return windowWidth, windowHeight
 }
 
 // calculateEditableConfidence 计算候选区域的可编辑控件置信度
@@ -2588,14 +2665,25 @@ func (b *Bridge) detectEditableControlSignals(windowHandle uintptr, rect InputBo
 func (b *Bridge) lightweightInputTest(windowHandle uintptr, rect InputBoxRect) []string {
 	signals := []string{}
 
+	// 获取窗口尺寸（逻辑坐标）
+	windowRect, rectResult := b.getWindowRectInternal(windowHandle)
+	if rectResult.Status != adapter.StatusSuccess {
+		return signals
+	}
+	windowWidth := int(windowRect.Right - windowRect.Left)
+	windowHeight := int(windowRect.Bottom - windowRect.Top)
+
 	// 获取点击前截图
 	beforeScreenshot, captureResult := b.CaptureWindow(windowHandle)
 	if captureResult.Status != adapter.StatusSuccess {
 		return signals
 	}
 
+	// 计算实际截图尺寸（处理DPI缩放）
+	screenshotWidth, screenshotHeight := calculateScreenshotDimensions(beforeScreenshot, windowWidth, windowHeight)
+
 	// 计算候选区域的平均亮度作为基准
-	beforeRGBA := mustBGRToRGBA(beforeScreenshot, int(rect.X+rect.Width), int(rect.Y+rect.Height))
+	beforeRGBA := mustBGRToRGBA(beforeScreenshot, screenshotWidth, screenshotHeight)
 	beforeBrightness := computeRectAverageBrightness(beforeRGBA, rect.X, rect.Y, rect.Width, rect.Height)
 
 	// 输入一个安全字符（如空格）
@@ -2612,7 +2700,7 @@ func (b *Bridge) lightweightInputTest(windowHandle uintptr, rect InputBoxRect) [
 	}
 
 	// 计算输入后的亮度变化
-	afterRGBA := mustBGRToRGBA(afterScreenshot, int(rect.X+rect.Width), int(rect.Y+rect.Height))
+	afterRGBA := mustBGRToRGBA(afterScreenshot, screenshotWidth, screenshotHeight)
 	afterBrightness := computeRectAverageBrightness(afterRGBA, rect.X, rect.Y, rect.Width, rect.Height)
 
 	// 如果亮度有变化，可能表示输入框被激活
@@ -2621,7 +2709,7 @@ func (b *Bridge) lightweightInputTest(windowHandle uintptr, rect InputBoxRect) [
 	}
 
 	// 计算视觉差异
-	visualDiff := CalculateRectDiffPercent(beforeScreenshot, afterScreenshot, int(rect.X+rect.Width), int(rect.Y+rect.Height), rect)
+	visualDiff := CalculateRectDiffPercent(beforeScreenshot, afterScreenshot, screenshotWidth, screenshotHeight, rect)
 	if visualDiff > 0 {
 		signals = append(signals, fmt.Sprintf("input_test:visual_change_%.3f", visualDiff))
 	}

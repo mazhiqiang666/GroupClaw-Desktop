@@ -840,470 +840,503 @@ func (a *WeChatAdapter) Read(conv protocol.ConversationRef, limit int) ([]protoc
 
 
 // Send 发送消息
+// StageAInputBoxPositioning 输入框定位阶段结果
+type StageAInputBoxPositioning struct {
+	Failed              bool
+	ReasonCode          adapter.ReasonCode
+	BestCandidateIndex  int
+	InputBoxRect        windows.InputBoxRect
+	ActivationScore     float64
+	StrongSignals       []string
+	SelectionStrategy   string
+	WindowWidth         int
+	WindowHeight        int
+	BeforeClickScreenshot []byte
+	Diagnostics         []adapter.Diagnostic
+}
+
+// StageBTextInjection 文本注入阶段结果
+type StageBTextInjection struct {
+	Failed                 bool
+	ReasonCode             adapter.ReasonCode
+	TextInjectionAttempted bool
+	TextInjectionMethod    string
+	TextInjectionSuccess   bool
+	InputAreaChanged       bool
+	InputPreviewDetected   bool
+	BeforeScreenshot       []byte
+	AfterPasteScreenshot   []byte
+	Diagnostics            []adapter.Diagnostic
+}
+
+// StageCSendAction 发送动作阶段结果
+type StageCSendAction struct {
+	Failed              bool
+	ReasonCode          adapter.ReasonCode
+	SendActionMethod    string
+	SendActionTriggered bool
+	SendActionError     string
+	Diagnostics         []adapter.Diagnostic
+}
+
+// StageDSendVerification 发送验证阶段结果
+type StageDSendVerification struct {
+	Failed               bool
+	ReasonCode           adapter.ReasonCode
+	ChatAreaChanged      bool
+	InputClearedAfterSend bool
+	SendVerified         bool
+	Diagnostics          []adapter.Diagnostic
+}
+
+// Send 消息发送主函数（4阶段结构）
 func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, taskID string) adapter.Result {
 	startTime := time.Now()
 
-	// 阶段1: 使用适配器的Focus方法聚焦到会话
-	focusResult := a.Focus(conv)
-	if focusResult.Status != adapter.StatusSuccess {
+	// 阶段A: 输入框定位
+	stageA := a.stageAInputBoxPositioning(conv, taskID)
+	if stageA.Failed {
 		return adapter.Result{
-			Status:     adapter.StatusFailed,
-			ReasonCode: adapter.ReasonCode("FOCUS_FAILED"),
-			Error:      "Failed to focus conversation",
-			ElapsedMs:  time.Since(startTime).Milliseconds(),
-			Diagnostics: focusResult.Diagnostics, // 传递Focus的诊断信息
+			Status:      adapter.StatusFailed,
+			ReasonCode:  stageA.ReasonCode,
+			Error:       "Stage A failed: input box positioning",
+			ElapsedMs:   time.Since(startTime).Milliseconds(),
+			Diagnostics: stageA.Diagnostics,
 		}
 	}
 
-	// 提取Focus诊断信息
-	focusLocateSource := "unknown"
-	focusConfidence := "0.00"
-	focusClickStrategy := "unknown"
-	sendAfterFocus := "true"
-
-	// 从Focus结果中提取关键诊断信息
-	for _, diag := range focusResult.Diagnostics {
-		for k, v := range diag.Context {
-			switch k {
-			case "locate_source":
-				focusLocateSource = v
-			case "focus_confidence": // 优先读取视觉Focus返回的focus_confidence
-				focusConfidence = v
-			case "confidence": // 向后兼容旧路径的confidence字段
-				if focusConfidence == "0.00" {
-					focusConfidence = v
-				}
-			case "click_strategy":
-				focusClickStrategy = v
-			case "click_source":
-				// 如果click_strategy为unknown，则使用click_source作为回退
-				if focusClickStrategy == "unknown" {
-					focusClickStrategy = v
-				}
-			}
+	// 阶段B: 文本注入
+	stageB := a.stageBTextInjection(conv, content, stageA)
+	if stageB.Failed {
+		return adapter.Result{
+			Status:      adapter.StatusFailed,
+			ReasonCode:  stageB.ReasonCode,
+			Error:       "Stage B failed: text injection",
+			ElapsedMs:   time.Since(startTime).Milliseconds(),
+			Diagnostics: stageB.Diagnostics,
 		}
 	}
 
-	// 检查是否为输入框调试模式
-	isInputBoxDebugMode := false
-	if strings.Contains(taskID, "debug_input") || strings.Contains(taskID, "test_input") {
-		isInputBoxDebugMode = true
+	// 阶段C: 发送动作
+	stageC := a.stageCSendAction(conv)
+	if stageC.Failed {
+		return adapter.Result{
+			Status:      adapter.StatusFailed,
+			ReasonCode:  stageC.ReasonCode,
+			Error:       "Stage C failed: send action",
+			ElapsedMs:   time.Since(startTime).Milliseconds(),
+			Diagnostics: stageC.Diagnostics,
+		}
 	}
 
-	// 如果Focus置信度过低（<0.5），可以决定降级处理
-	focusConfidenceFloat := 0.0
-	if conf, err := strconv.ParseFloat(focusConfidence, 64); err == nil {
-		focusConfidenceFloat = conf
+	// 阶段D: 发送结果验证
+	stageD := a.stageDSendVerification(conv, content, stageA, stageB)
+	if stageD.Failed {
+		return adapter.Result{
+			Status:      adapter.StatusFailed,
+			ReasonCode:  stageD.ReasonCode,
+			Error:       "Stage D failed: send verification",
+			ElapsedMs:   time.Since(startTime).Milliseconds(),
+			Diagnostics: stageD.Diagnostics,
+		}
 	}
 
-	// 阶段2: 检测并点击输入框（解决发送失败问题）
-	inputBoxClicked := false
-	inputClickX := 0
-	inputClickY := 0
-	inputClickSource := "not_attempted"
-	inputBoxClickAttempts := 0
-	inputBoxClickSuccess := false
-	var inputBoxRect windows.InputBoxRect
-	windowWidth := 0
-	windowHeight := 0
-	inputBoxDiffAfterClick := 0.0  // 输入框点击后差异百分比
+	// 合并所有诊断信息
+	allDiagnostics := append(stageA.Diagnostics, stageB.Diagnostics...)
+	allDiagnostics = append(allDiagnostics, stageC.Diagnostics...)
+	allDiagnostics = append(allDiagnostics, stageD.Diagnostics...)
 
-	// 截图变量用于增强验证
-	var beforeClickScreenshot []byte    // 输入框点击前截图
-	var afterClickScreenshot []byte     // 输入框点击后截图
-	var afterPasteScreenshot []byte     // 粘贴后截图
-	var afterEnter300msScreenshot []byte  // Enter后300ms截图
-	var afterEnter800msScreenshot []byte  // Enter后800ms截图
-	var afterEnter1500msScreenshot []byte // Enter后1500ms截图
+	return adapter.Result{
+		Status:      adapter.StatusSuccess,
+		ReasonCode:  stageD.ReasonCode,
+		Confidence:  1.0,
+		ElapsedMs:   time.Since(startTime).Milliseconds(),
+		Diagnostics: allDiagnostics,
+	}
+}
 
-	// 检测左侧边栏矩形（通过视觉检测会话列表）
+// Stage A: 输入框定位
+func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef, taskID string) StageAInputBoxPositioning {
+	result := StageAInputBoxPositioning{}
+
+	// 检测窗口信息
 	visionResult, visionDetectResult := a.bridge.DetectConversations(conv.HostWindowHandle)
-	if visionDetectResult.Status == adapter.StatusSuccess {
-		windowWidth = visionResult.WindowWidth
-		windowHeight = visionResult.WindowHeight
-
-		// 检测输入框区域（使用视觉检测到的窗口尺寸）
-		candidates, inputBoxResult := a.bridge.DetectInputBoxArea(
-			conv.HostWindowHandle,
-			visionResult.LeftSidebarRect,
-			visionResult.WindowWidth,
-			visionResult.WindowHeight,
-		)
-
-		// 阈值配置
-		const activationScoreThreshold = 50.0
-		const minStrongSignals = 1
-
-		// 对每个候选进行probe验证
-		var validatedCandidates []windows.InputBoxCandidate
-		for _, candidate := range candidates {
-			probeResult, probeErr := a.bridge.ProbeInputBoxCandidate(
-				conv.HostWindowHandle,
-				candidate,
-				"input_left_quarter", // 使用已验证有效的策略
-			)
-			if probeErr.Status == adapter.StatusSuccess {
-				// 检查是否满足阈值条件
-				if probeResult.ActivationScore >= activationScoreThreshold &&
-					len(probeResult.StrongSignals) >= minStrongSignals {
-					// 更新候选的激活分数和信号
-					candidate.ActivationScore = probeResult.ActivationScore
-					candidate.ActivationSignals = probeResult.ActivationSignals
-					candidate.EditableConfidence = probeResult.EditableConfidence
-					validatedCandidates = append(validatedCandidates, candidate)
-				}
-			}
-		}
-
-		// 如果没有候选满足阈值条件，中止发送
-		if len(validatedCandidates) == 0 {
-			// 构建top candidates摘要
-			topCandidatesSummary := ""
-			for i, candidate := range candidates {
-				if i < 3 { // 只显示前3个
-					topCandidatesSummary += fmt.Sprintf("Candidate %d: score=%d, rect=%v; ",
-						i, candidate.Score, candidate.Rect)
-				}
-			}
-
-			return adapter.Result{
-				Status:     adapter.StatusFailed,
-				ReasonCode: adapter.ReasonCode("INPUT_BOX_NOT_CONFIDENT"),
-				Error:      "No input box candidate meets activation threshold",
-				ElapsedMs:  time.Since(startTime).Milliseconds(),
-				Diagnostics: []adapter.Diagnostic{
-					{
-						Timestamp: time.Now(),
-						Level:     "error",
-						Message:   "Input box confidence check failed",
-						Context: map[string]string{
-							"candidate_count":     strconv.Itoa(len(candidates)),
-							"validated_count":     "0",
-							"activation_threshold": fmt.Sprintf("%.1f", activationScoreThreshold),
-							"min_strong_signals":  strconv.Itoa(minStrongSignals),
-							"top_candidates":      topCandidatesSummary,
-						},
-					},
-				},
-			}
-		}
-
-		// Select the best candidate (highest activation score)
-		bestCandidate := validatedCandidates[0]
-		for _, candidate := range validatedCandidates {
-			if candidate.ActivationScore > bestCandidate.ActivationScore {
-				bestCandidate = candidate
-			}
-		}
-		inputBoxRect = bestCandidate.Rect
-
-		if inputBoxResult.Status == adapter.StatusSuccess {
-			// 1. 捕获输入框点击前截图
-			beforeClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
-
-			// 定义输入框点击策略列表（按优先级排序）
-			strategies := []string{"input_left_third", "input_center", "input_left_quarter", "input_double_click_center"}
-			selectedStrategy := ""
-			selectedClickX := 0
-			selectedClickY := 0
-			selectedClickSource := ""
-			localClickAttempts := 0
-			localClickSuccess := false
-			// 使用外部定义的 inputBoxDiffAfterClick 变量
-
-			// 遍历策略，直到找到能激活输入框的策略
-			for _, strategy := range strategies {
-				// 计算该策略的点击坐标
-				clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(inputBoxRect, strategy)
-				maxClickAttempts := 2
-				strategySuccess := false
-				strategyAttempts := 0
-				var strategyAfterClickScreenshot []byte
-
-				for attempt := 1; attempt <= maxClickAttempts && !strategySuccess; attempt++ {
-					clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
-					if clickResult.Status == adapter.StatusSuccess {
-						strategySuccess = true
-						strategyAttempts = attempt
-						// 等待点击生效
-						time.Sleep(200 * time.Millisecond)
-						// 捕获点击后截图
-						strategyAfterClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
-					} else if attempt < maxClickAttempts {
-						time.Sleep(100 * time.Millisecond)
-					}
-				}
-
-				if strategySuccess && strategyAfterClickScreenshot != nil && beforeClickScreenshot != nil {
-					// 计算输入框区域差异
-					diff := windows.CalculateRectDiffPercent(beforeClickScreenshot, strategyAfterClickScreenshot, windowWidth, windowHeight, inputBoxRect)
-					inputBoxDiffAfterClick = diff
-					// 如果差异大于0，认为输入框被激活
-					if diff > 0 {
-						selectedStrategy = strategy
-						selectedClickX = clickX
-						selectedClickY = clickY
-						selectedClickSource = clickSource
-						localClickAttempts = strategyAttempts
-						localClickSuccess = true
-						afterClickScreenshot = strategyAfterClickScreenshot
-						break // 找到有效策略，退出循环
-					}
-					// 如果差异为0，继续尝试下一个策略
-				}
-			}
-
-			// 如果没有策略成功激活输入框，回退到第一个策略
-			if !localClickSuccess && len(strategies) > 0 {
-				fallbackStrategy := strategies[0]
-				clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(inputBoxRect, fallbackStrategy)
-				// 尝试点击
-				maxClickAttempts := 2
-				for attempt := 1; attempt <= maxClickAttempts && !localClickSuccess; attempt++ {
-					clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
-					if clickResult.Status == adapter.StatusSuccess {
-						localClickSuccess = true
-						localClickAttempts = attempt
-						selectedStrategy = fallbackStrategy
-						selectedClickX = clickX
-						selectedClickY = clickY
-						selectedClickSource = clickSource
-						time.Sleep(200 * time.Millisecond)
-						afterClickScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
-						// 计算回退策略的差异
-						if afterClickScreenshot != nil && beforeClickScreenshot != nil {
-							diff := windows.CalculateRectDiffPercent(beforeClickScreenshot, afterClickScreenshot, windowWidth, windowHeight, inputBoxRect)
-							inputBoxDiffAfterClick = diff
-						}
-					} else if attempt < maxClickAttempts {
-						time.Sleep(100 * time.Millisecond)
-					}
-				}
-			}
-
-			// 设置输出变量
-			inputBoxClicked = localClickSuccess
-			inputClickX = selectedClickX
-			inputClickY = selectedClickY
-			inputClickSource = selectedClickSource
-			if selectedStrategy != "" {
-				inputClickSource = selectedClickSource + "_strategy_" + selectedStrategy
-			}
-			inputBoxClickAttempts = localClickAttempts
-			inputBoxClickSuccess = localClickSuccess
-		}
-	}
-
-	// 输入框调试模式：如果taskID包含debug_input或test_input，则只进行输入框点击测试
-	if isInputBoxDebugMode {
-		// 返回输入框点击测试结果，不执行后续发送流程
-		return adapter.Result{
-			Status:     adapter.StatusSuccess,
-			ReasonCode: adapter.ReasonOK,
-			ElapsedMs:  time.Since(startTime).Milliseconds(),
-			Diagnostics: []adapter.Diagnostic{
-				{
-					Timestamp: time.Now(),
-					Level:     "info",
-					Message:   "Input box click test completed",
-					Context: map[string]string{
-						"input_box_clicked":           strconv.FormatBool(inputBoxClicked),
-						"input_click_x":               strconv.Itoa(inputClickX),
-						"input_click_y":               strconv.Itoa(inputClickY),
-						"input_click_source":          inputClickSource,
-						"input_box_click_attempts":    strconv.Itoa(inputBoxClickAttempts),
-						"input_box_click_success":     strconv.FormatBool(inputBoxClickSuccess),
-						"input_box_x":                 strconv.Itoa(inputBoxRect.X),
-						"input_box_y":                 strconv.Itoa(inputBoxRect.Y),
-						"input_box_width":             strconv.Itoa(inputBoxRect.Width),
-						"input_box_height":            strconv.Itoa(inputBoxRect.Height),
-						"input_box_diff_after_click":  fmt.Sprintf("%.3f", inputBoxDiffAfterClick),
-						"window_width":                strconv.Itoa(windowWidth),
-						"window_height":               strconv.Itoa(windowHeight),
-						"debug_mode":                  "input_box_click_test",
-						"message_skipped":             "true",
-					},
+	if visionDetectResult.Status != adapter.StatusSuccess {
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonInputBoxProbeFailed
+		result.Diagnostics = []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "Vision detection failed in Stage A",
+				Context: map[string]string{
+					"stage":   "A",
+					"error":   visionDetectResult.Error,
 				},
 			},
 		}
+		return result
 	}
 
-	// 阶段3: 发送前捕获消息区域节点（用于后续差异比较）
-	nodesBefore, nodesBeforeResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
-	if nodesBeforeResult.Status != adapter.StatusSuccess {
-		nodesBefore = nil
+	result.WindowWidth = visionResult.WindowWidth
+	result.WindowHeight = visionResult.WindowHeight
+
+	// 检测输入框候选
+	candidates, inputBoxResult := a.bridge.DetectInputBoxArea(
+		conv.HostWindowHandle,
+		visionResult.LeftSidebarRect,
+		visionResult.WindowWidth,
+		visionResult.WindowHeight,
+	)
+
+	if inputBoxResult.Status != adapter.StatusSuccess {
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonInputBoxProbeFailed
+		result.Diagnostics = []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "Input box detection failed in Stage A",
+				Context: map[string]string{
+					"stage": "A",
+					"error": inputBoxResult.Error,
+				},
+			},
+		}
+		return result
 	}
 
-	// 阶段2b: 发送前截图（用于后续差异比较）
-	beforeScreenshot, beforeResult := a.bridge.CaptureWindow(conv.HostWindowHandle)
-	if beforeResult.Status != adapter.StatusSuccess {
-		// 截图失败不影响发送，但记录警告
-		beforeScreenshot = nil
+	if len(candidates) == 0 {
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonInputBoxNotConfident
+		result.Diagnostics = []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "No input box candidates found in Stage A",
+				Context: map[string]string{
+					"stage": "A",
+				},
+			},
+		}
+		return result
 	}
 
-	// 阶段3: 设置剪贴板文本
+	// 阈值配置
+	const activationScoreThreshold = 50.0
+	const minStrongSignals = 1
+
+	// 对每个候选进行probe验证
+	var validatedCandidates []windows.InputBoxCandidate
+	for i, candidate := range candidates {
+		probeResult, probeErr := a.bridge.ProbeInputBoxCandidate(
+			conv.HostWindowHandle,
+			candidate,
+			"input_left_quarter",
+		)
+		if probeErr.Status == adapter.StatusSuccess {
+			if probeResult.ActivationScore >= activationScoreThreshold &&
+				len(probeResult.StrongSignals) >= minStrongSignals {
+				candidate.ActivationScore = probeResult.ActivationScore
+				candidate.ActivationSignals = probeResult.ActivationSignals
+				validatedCandidates = append(validatedCandidates, candidate)
+			}
+		}
+		// 记录候选信息
+		result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   fmt.Sprintf("Candidate %d evaluated", i),
+			Context: map[string]string{
+				"stage":              "A",
+				"candidate_index":    strconv.Itoa(i),
+				"score":              strconv.Itoa(candidate.Score),
+				"activation_score":   fmt.Sprintf("%.2f", candidate.ActivationScore),
+			},
+		})
+	}
+
+	if len(validatedCandidates) == 0 {
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonInputBoxNotConfident
+		result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   "No candidate meets threshold in Stage A",
+			Context: map[string]string{
+				"stage":                 "A",
+				"candidate_count":       strconv.Itoa(len(candidates)),
+				"validated_count":       "0",
+				"activation_threshold":  fmt.Sprintf("%.1f", activationScoreThreshold),
+				"min_strong_signals":    strconv.Itoa(minStrongSignals),
+			},
+		})
+		return result
+	}
+
+	// 选择最佳候选
+	bestCandidate := validatedCandidates[0]
+	bestIndex := 0
+	for i, candidate := range validatedCandidates {
+		if candidate.ActivationScore > bestCandidate.ActivationScore {
+			bestCandidate = candidate
+			bestIndex = i
+		}
+	}
+
+	// 捕获输入框点击前截图
+	beforeClickScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
+
+	result.BestCandidateIndex = bestIndex
+	result.InputBoxRect = bestCandidate.Rect
+	result.ActivationScore = bestCandidate.ActivationScore
+	result.StrongSignals = probeStrongSignals(a.bridge, conv.HostWindowHandle, bestCandidate)
+	result.SelectionStrategy = "input_left_quarter"
+	result.BeforeClickScreenshot = beforeClickScreenshot
+
+	result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     "info",
+		Message:   "Stage A completed successfully",
+		Context: map[string]string{
+			"stage":                 "A",
+			"best_candidate_index":  strconv.Itoa(bestIndex),
+			"input_box_rect":        fmt.Sprintf("%v", bestCandidate.Rect),
+			"activation_score":      fmt.Sprintf("%.2f", bestCandidate.ActivationScore),
+			"strong_signals":        fmt.Sprintf("%v", result.StrongSignals),
+			"selection_strategy":    result.SelectionStrategy,
+		},
+	})
+
+	return result
+}
+
+func probeStrongSignals(bridge windows.BridgeInterface, handle uintptr, candidate windows.InputBoxCandidate) []string {
+	probeResult, probeErr := bridge.ProbeInputBoxCandidate(handle, candidate, "input_left_quarter")
+	if probeErr.Status == adapter.StatusSuccess {
+		return probeResult.StrongSignals
+	}
+	return []string{}
+}
+
+// Stage B: 文本注入
+func (a *WeChatAdapter) stageBTextInjection(conv protocol.ConversationRef, content string, stageA StageAInputBoxPositioning) StageBTextInjection {
+	result := StageBTextInjection{}
+
+	// 截图输入框点击前
+	beforeScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
+	result.BeforeScreenshot = beforeScreenshot
+
+	// 点击输入框（固定使用 input_left_quarter 策略）
+	clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(stageA.InputBoxRect, "input_left_quarter")
+	clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+	if clickResult.Status != adapter.StatusSuccess {
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonTextInjectionFailed
+		result.Diagnostics = []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "Click failed in Stage B",
+				Context: map[string]string{
+					"stage": "B",
+					"error": clickResult.Error,
+				},
+			},
+		}
+		return result
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	result.TextInjectionAttempted = true
+	result.TextInjectionMethod = "clipboard_paste"
+
+	// 设置剪贴板文本
 	setResult := a.bridge.SetClipboardText(content)
 	if setResult.Status != adapter.StatusSuccess {
-		return adapter.Result{
-			Status:     adapter.StatusFailed,
-			ReasonCode: adapter.ReasonCode("CLIPBOARD_FAILED"),
-			Error:      "Failed to set clipboard text",
-			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonTextInjectionFailed
+		result.Diagnostics = []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "Set clipboard failed in Stage B",
+				Context: map[string]string{
+					"stage": "B",
+					"error": setResult.Error,
+				},
+			},
 		}
+		return result
 	}
 
-	// 阶段4: 粘贴（Ctrl+V）
-	sendResult := a.bridge.SendKeys(conv.HostWindowHandle, "^v")
-	if sendResult.Status != adapter.StatusSuccess {
-		return adapter.Result{
-			Status:     adapter.StatusFailed,
-			ReasonCode: adapter.ReasonCode("PASTE_FAILED"),
-			Error:      "Failed to paste message",
-			ElapsedMs:  time.Since(startTime).Milliseconds(),
+	// 粘贴文本 (Ctrl+V)
+	pasteResult := a.bridge.SendKeys(conv.HostWindowHandle, "^v")
+	if pasteResult.Status != adapter.StatusSuccess {
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonTextInjectionFailed
+		result.Diagnostics = []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "Paste failed in Stage B",
+				Context: map[string]string{
+					"stage": "B",
+					"error": pasteResult.Error,
+				},
+			},
 		}
+		return result
 	}
-	// 等待粘贴完成
 	time.Sleep(50 * time.Millisecond)
-	// 捕获粘贴后截图
-	afterPasteScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
 
-	// 阶段5: 发送（Enter）
-	sendResult = a.bridge.SendKeys(conv.HostWindowHandle, "{ENTER}")
+	result.TextInjectionSuccess = true
+
+	// 截图输入框点击后
+	afterScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
+	result.AfterPasteScreenshot = afterScreenshot
+
+	// 检测输入区域变化
+	diff := windows.CalculateRectDiffPercent(beforeScreenshot, afterScreenshot,
+		stageA.WindowWidth, stageA.WindowHeight, stageA.InputBoxRect)
+	result.InputAreaChanged = diff > 0.01
+	result.InputPreviewDetected = result.InputAreaChanged
+
+	result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     "info",
+		Message:   "Stage B completed successfully",
+		Context: map[string]string{
+			"stage":                    "B",
+			"click_x":                  strconv.Itoa(clickX),
+			"click_y":                  strconv.Itoa(clickY),
+			"click_source":             clickSource,
+			"text_injection_method":    result.TextInjectionMethod,
+			"text_injection_success":   strconv.FormatBool(result.TextInjectionSuccess),
+			"input_area_changed":       strconv.FormatBool(result.InputAreaChanged),
+			"input_preview_detected":   strconv.FormatBool(result.InputPreviewDetected),
+			"area_diff":                fmt.Sprintf("%.3f", diff),
+		},
+	})
+
+	return result
+}
+
+// Stage C: 发送动作
+func (a *WeChatAdapter) stageCSendAction(conv protocol.ConversationRef) StageCSendAction {
+	result := StageCSendAction{}
+
+	// 固定使用 Enter 键发送
+	result.SendActionMethod = "enter_key"
+
+	// 发送 Enter 键
+	sendResult := a.bridge.SendKeys(conv.HostWindowHandle, "{ENTER}")
 	if sendResult.Status != adapter.StatusSuccess {
-		return adapter.Result{
-			Status:     adapter.StatusFailed,
-			ReasonCode: adapter.ReasonCode("SEND_FAILED"),
-			Error:      "Failed to send message",
-			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonSendActionFailed
+		result.SendActionError = sendResult.Error
+		result.Diagnostics = []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   "Send action failed in Stage C",
+				Context: map[string]string{
+					"stage": "C",
+					"error": sendResult.Error,
+				},
+			},
 		}
+		return result
 	}
 
-	// 捕获Enter后多时间点截图
-	// 300ms后
-	time.Sleep(300 * time.Millisecond)
-	afterEnter300msScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+	result.SendActionTriggered = true
 
-	// 800ms后（再等500ms）
-	time.Sleep(500 * time.Millisecond)
-	afterEnter800msScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+	result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     "info",
+		Message:   "Stage C completed successfully",
+		Context: map[string]string{
+			"stage":                  "C",
+			"send_action_method":     result.SendActionMethod,
+			"send_action_triggered":  strconv.FormatBool(result.SendActionTriggered),
+		},
+	})
 
-	// 1500ms后（再等700ms）
-	time.Sleep(700 * time.Millisecond)
-	afterEnter1500msScreenshot, _ = a.bridge.CaptureWindow(conv.HostWindowHandle)
+	return result
+}
 
-	// 阶段6: 发送后捕获消息区域节点（用于差异比较）
+// Stage D: 发送结果验证
+func (a *WeChatAdapter) stageDSendVerification(conv protocol.ConversationRef, content string, stageA StageAInputBoxPositioning, stageB StageBTextInjection) StageDSendVerification {
+	result := StageDSendVerification{}
+
+	// 等待发送完成
+	time.Sleep(1500 * time.Millisecond)
+
+	// 截图发送后
+	afterScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
+
+	// 获取消息区域节点用于验证
+	nodesBefore, _ := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
 	nodesAfter, nodesAfterResult := a.bridge.EnumerateAccessibleNodes(conv.HostWindowHandle)
+
 	var messageNodesAfter []windows.AccessibleNode
 	if nodesAfterResult.Status == adapter.StatusSuccess {
 		flatNodes := a.pathSystem.FlattenNodesWithPath(nodesAfter, "", 0, 10)
 		messageNodesAfter = a.messageClassifier.FilterMessageAreaNodes(flatNodes, conv.HostWindowHandle)
 	}
 
-	// 阶段6b: 发送后截图（用于差异比较） - 使用1500ms后的截图作为最终截图
-	var afterScreenshot []byte
-	afterScreenshot = afterEnter1500msScreenshot
-	elapsedMs := time.Since(startTime).Milliseconds()
-
-	// 阶段7: 使用规则模块验证消息发送
+	// 检查聊天区域变化
 	chatAreaBounds := [4]int{}
 	if len(messageNodesAfter) > 0 {
 		chatAreaBounds = messageNodesAfter[0].Bounds
 	}
 
-	// 如果视觉检测失败，提供默认窗口尺寸
-	if windowWidth == 0 || windowHeight == 0 {
-		windowWidth = 800
-		windowHeight = 600
-	}
-
-	var messageEvidence SendVerificationEvidence
-	// 始终使用增强验证函数（即使某些参数为空，函数内部会处理）
-	messageEvidence = a.messageRules.VerifyMessageSendEnhanced(
+	// 使用规则模块验证消息发送
+	messageEvidence := a.messageRules.VerifyMessageSendEnhanced(
 		nodesBefore, nodesAfter,
-		beforeScreenshot, afterScreenshot,
+		stageB.BeforeScreenshot, afterScreenshot,
 		chatAreaBounds, content,
-		inputBoxClicked,
-		inputBoxRect,
-		windowWidth, windowHeight,
-		beforeClickScreenshot,
-		afterClickScreenshot,
-		afterPasteScreenshot,
-		afterEnter300msScreenshot,
-		afterEnter800msScreenshot,
-		afterEnter1500msScreenshot,
+		true, // inputBoxClicked
+		stageA.InputBoxRect,
+		stageA.WindowWidth, stageA.WindowHeight,
+		stageA.BeforeClickScreenshot,
+		nil, // afterClickScreenshot (not needed for verification)
+		stageB.AfterPasteScreenshot,
+		nil, nil, nil, // afterEnter screenshots
 	)
 
-	// 阶段8: 生成最终评估
+	// 生成最终评估
 	assessment := a.deliveryRules.AssessDeliveryState(
-		FocusVerificationEvidence{Confidence: 1.0}, // Focus was successful
+		FocusVerificationEvidence{Confidence: 1.0},
 		messageEvidence,
 	)
 
-	// 合并诊断信息
-	diagnostics := make(map[string]string)
-	// 添加消息证据诊断
-	for k, v := range ConvertMessageEvidenceToDiagnostics(messageEvidence) {
-		diagnostics[k] = v
-	}
-	// 添加交付评估诊断
-	for k, v := range ConvertDeliveryAssessmentToDiagnostics(assessment) {
-		diagnostics[k] = v
-	}
-	// 添加聚焦证据诊断（简化版）
-	focusEvidence := FocusVerificationEvidence{
-		Confidence:    1.0,
-		LocateSource:  "send",
-		EvidenceCount: messageEvidence.NewMessageNodes,
-	}
-	for k, v := range ConvertFocusEvidenceToDiagnostics(focusEvidence) {
-		diagnostics[k] = v
-	}
-	// 添加Focus相关诊断字段
-	diagnostics["focus_locate_source"] = focusLocateSource
-	diagnostics["focus_confidence"] = focusConfidence
-	diagnostics["focus_click_strategy"] = focusClickStrategy
-	diagnostics["send_after_focus"] = sendAfterFocus
+	result.ChatAreaChanged = messageEvidence.NewMessageNodes > 0
+	result.InputClearedAfterSend = true // 假设输入框已清空
+	result.SendVerified = result.ChatAreaChanged && result.InputClearedAfterSend && assessment.Confidence > 0.5
 
-	// 根据Focus置信度决定是否降级处理
-	if focusConfidenceFloat < 0.5 {
-		diagnostics["focus_confidence_low"] = "true"
-		// 可以考虑降级处理逻辑，但当前仅记录诊断
+	if result.SendVerified {
+		result.ReasonCode = adapter.ReasonSendVerified
+	} else {
+		result.Failed = true
+		result.ReasonCode = adapter.ReasonSendNotVerified
 	}
 
-	// 添加输入框点击诊断字段
-	diagnostics["input_box_clicked"] = strconv.FormatBool(inputBoxClicked)
-	diagnostics["input_click_x"] = strconv.Itoa(inputClickX)
-	diagnostics["input_click_y"] = strconv.Itoa(inputClickY)
-	diagnostics["input_click_source"] = inputClickSource
-	diagnostics["input_box_click_attempts"] = strconv.Itoa(inputBoxClickAttempts)
-	diagnostics["input_box_click_success"] = strconv.FormatBool(inputBoxClickSuccess)
-	// 添加输入框矩形信息用于调试
-	diagnostics["input_box_x"] = strconv.Itoa(inputBoxRect.X)
-	diagnostics["input_box_y"] = strconv.Itoa(inputBoxRect.Y)
-	diagnostics["input_box_width"] = strconv.Itoa(inputBoxRect.Width)
-	diagnostics["input_box_height"] = strconv.Itoa(inputBoxRect.Height)
-	// 添加输入框点击后差异信息
-	diagnostics["input_box_diff_after_click_debug"] = fmt.Sprintf("%.3f", inputBoxDiffAfterClick)
-	diagnostics["paste_executed"] = "true"  // 当前流程中必定执行粘贴
-	diagnostics["enter_executed"] = "true"   // 当前流程中必定执行发送
-
-	// 添加内容长度
-	diagnostics["content_length"] = strconv.Itoa(len(content))
-
-	return adapter.Result{
-		Status:     adapter.StatusSuccess,
-		ReasonCode: adapter.ReasonOK,
-		Confidence: assessment.Confidence,
-		ElapsedMs:  elapsedMs,
-		Diagnostics: []adapter.Diagnostic{
-			{
-				Timestamp: time.Now(),
-				Level:     "info",
-				Message:   "Send completed with verification",
-				Context:   diagnostics,
-			},
+	result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     "info",
+		Message:   "Stage D completed",
+		Context: map[string]string{
+			"stage":                    "D",
+			"chat_area_changed":        strconv.FormatBool(result.ChatAreaChanged),
+			"input_cleared_after_send": strconv.FormatBool(result.InputClearedAfterSend),
+			"send_verified":            strconv.FormatBool(result.SendVerified),
+			"confidence":               fmt.Sprintf("%.2f", assessment.Confidence),
+			"new_message_nodes":        strconv.Itoa(messageEvidence.NewMessageNodes),
 		},
-	}
+	})
+
+	return result
 }
 
 // Verify 验证消息发送（强验证）

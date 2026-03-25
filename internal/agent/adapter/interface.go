@@ -64,12 +64,18 @@ const (
 type ReasonCode string
 
 const (
-	ReasonOK            ReasonCode = "OK"
-	ReasonAppNotRunning ReasonCode = "APP_NOT_RUNNING"
-	ReasonWindowNotFound ReasonCode = "WINDOW_NOT_FOUND"
-	ReasonConvNotFound  ReasonCode = "CONV_NOT_FOUND"
-	ReasonSendFailed    ReasonCode = "SEND_FAILED"
-	ReasonVerifyFailed  ReasonCode = "VERIFY_FAILED"
+	ReasonOK                  ReasonCode = "OK"
+	ReasonAppNotRunning       ReasonCode = "APP_NOT_RUNNING"
+	ReasonWindowNotFound      ReasonCode = "WINDOW_NOT_FOUND"
+	ReasonConvNotFound        ReasonCode = "CONV_NOT_FOUND"
+	ReasonSendFailed          ReasonCode = "SEND_FAILED"
+	ReasonVerifyFailed        ReasonCode = "VERIFY_FAILED"
+	ReasonInputBoxNotConfident ReasonCode = "INPUT_BOX_NOT_CONFIDENT"
+	ReasonInputBoxProbeFailed ReasonCode = "INPUT_BOX_PROBE_FAILED"
+	ReasonTextInjectionFailed ReasonCode = "TEXT_INJECTION_FAILED"
+	ReasonSendActionFailed    ReasonCode = "SEND_ACTION_FAILED"
+	ReasonSendNotVerified     ReasonCode = "SEND_NOT_VERIFIED"
+	ReasonSendVerified        ReasonCode = "SEND_VERIFIED"
 )
 
 // DataSource 数据来源

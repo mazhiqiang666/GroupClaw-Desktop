@@ -1528,6 +1528,42 @@ func (b *Bridge) CaptureWindow(handle uintptr) ([]byte, adapter.Result) {
 		}
 	}
 
+	// 获取实际的位图尺寸（可能因DPI缩放而不同）
+	// 使用 GetObject 获取位图信息
+	procGetObject := modgdi32.NewProc("GetObjectW")
+	type BITMAP struct {
+		BmType       int32
+		BmWidth      int32
+		BmHeight     int32
+		BmWidthBytes int32
+		BmPlanes     uint16
+		BmBitsPixel  uint16
+		BmBits       uintptr
+	}
+	var bmp BITMAP
+	ret, _, _ = procGetObject.Call(bitmap, uintptr(unsafe.Sizeof(bmp)), uintptr(unsafe.Pointer(&bmp)))
+	if ret != 0 && bmp.BmWidth > 0 && bmp.BmHeight > 0 {
+		// 如果实际位图尺寸与窗口尺寸不同，说明有DPI缩放
+		// 重新分配缓冲区并获取正确的位图数据
+		if width != bmp.BmWidth || height != bmp.BmHeight {
+			width = bmp.BmWidth
+			height = bmp.BmHeight
+			bih.BiWidth = bmp.BmWidth
+			bih.BiHeight = -bmp.BmHeight
+			rowSize = ((int32(width)*24 + 31) / 32) * 4
+			imageSize = uint32(rowSize * height)
+			pixels = make([]byte, imageSize)
+			ret, _, _ = procGetDIBits.Call(memDC, bitmap, 0, uintptr(height), uintptr(unsafe.Pointer(&pixels[0])), uintptr(unsafe.Pointer(&bih)), 0)
+			if ret == 0 {
+				return nil, adapter.Result{
+					Status:     adapter.StatusFailed,
+					ReasonCode: adapter.ReasonCode("CAPTURE_FAILED"),
+					Error:      "Failed to get bitmap bits with correct dimensions",
+				}
+			}
+		}
+	}
+
 	// 转换为 PNG 或返回原始像素数据
 	// 这里返回原始像素数据（BGR 格式）
 	return pixels, adapter.Result{
