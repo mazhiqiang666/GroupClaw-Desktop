@@ -852,6 +852,12 @@ type StageAInputBoxPositioning struct {
 	WindowWidth         int
 	WindowHeight        int
 	BeforeClickScreenshot []byte
+	// 分级决策相关字段
+	ConfidenceLevel     string // confirmed/probable/fallback
+	SelectionReason     string // 选择原因
+	CandidateCount      int    // 候选总数
+	ValidatedCount      int    // 验证通过数
+	AllCandidates       []windows.InputBoxCandidate // 所有候选
 	Diagnostics         []adapter.Diagnostic
 }
 
@@ -864,10 +870,12 @@ type StageBTextInjection struct {
 	TextInjectionSuccess   bool
 	InputAreaChanged       bool
 	InputPreviewDetected   bool
+	DiffPercent            float64 // 输入区域变化百分比
 	BeforeScreenshot       []byte
 	AfterPasteScreenshot   []byte
 	WeakSignals            []string // 弱信号列表
 	StrongSignals          []string // 强信号列表
+	AttemptChain           []map[string]string // 多候选尝试链路
 	Diagnostics            []adapter.Diagnostic
 }
 
@@ -899,7 +907,10 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 
 	// 阶段A: 输入框定位
 	stageA := a.stageAInputBoxPositioning(conv, taskID)
-	if stageA.Failed {
+
+	// 允许 Stage A 非 confirmed 时继续执行 Stage B
+	// 只有在完全失败（无候选、探测失败）时才返回
+	if stageA.Failed && stageA.ReasonCode != adapter.ReasonInputBoxNotConfident {
 		return adapter.Result{
 			Status:      adapter.StatusFailed,
 			ReasonCode:  stageA.ReasonCode,
@@ -908,6 +919,22 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 			Diagnostics: stageA.Diagnostics,
 		}
 	}
+
+	// 记录 Stage A 的置信度级别
+	stageADiagnostic := adapter.Diagnostic{
+		Timestamp: time.Now(),
+		Level:     "info",
+		Message:   fmt.Sprintf("Stage A confidence level: %s", stageA.ConfidenceLevel),
+		Context: map[string]string{
+			"stage":              "A",
+			"confidence_level":   stageA.ConfidenceLevel,
+			"selection_reason":   stageA.SelectionReason,
+			"candidate_count":    strconv.Itoa(stageA.CandidateCount),
+			"validated_count":    strconv.Itoa(stageA.ValidatedCount),
+			"best_candidate_idx": strconv.Itoa(stageA.BestCandidateIndex),
+		},
+	}
+	stageA.Diagnostics = append(stageA.Diagnostics, stageADiagnostic)
 
 	// 阶段B: 文本注入
 	stageB := a.stageBTextInjection(conv, content, stageA)
@@ -962,6 +989,17 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 // Stage A: 输入框定位
 func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef, taskID string) StageAInputBoxPositioning {
 	result := StageAInputBoxPositioning{}
+
+	// Helper function to find candidate index in allCandidates slice
+	candidatesIndex := func(candidates []windows.InputBoxCandidate, target windows.InputBoxCandidate) int {
+		for i, c := range candidates {
+			if c.Rect.X == target.Rect.X && c.Rect.Y == target.Rect.Y &&
+				c.Rect.Width == target.Rect.Width && c.Rect.Height == target.Rect.Height {
+				return i
+			}
+		}
+		return -1
+	}
 
 	// 检测窗口信息
 	visionResult, visionDetectResult := a.bridge.DetectConversations(conv.HostWindowHandle)
@@ -1028,24 +1066,40 @@ func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef,
 
 	// 阈值配置
 	const activationScoreThreshold = 50.0
+	const weakActivationThreshold = 10.0
 	const minStrongSignals = 1
 
 	// 对每个候选进行probe验证
-	var validatedCandidates []windows.InputBoxCandidate
+	var confirmedCandidates []windows.InputBoxCandidate
+	var probableCandidates []windows.InputBoxCandidate
+	var allCandidates []windows.InputBoxCandidate
+
 	for i, candidate := range candidates {
 		probeResult, probeErr := a.bridge.ProbeInputBoxCandidate(
 			conv.HostWindowHandle,
 			candidate,
 			"input_left_quarter",
 		)
+
+		// 记录原始候选信息
+		allCandidates = append(allCandidates, candidate)
+
 		if probeErr.Status == adapter.StatusSuccess {
+			candidate.ActivationScore = probeResult.ActivationScore
+			candidate.ActivationSignals = probeResult.ActivationSignals
+
+			// 分级决策逻辑
 			if probeResult.ActivationScore >= activationScoreThreshold &&
 				len(probeResult.StrongSignals) >= minStrongSignals {
-				candidate.ActivationScore = probeResult.ActivationScore
-				candidate.ActivationSignals = probeResult.ActivationSignals
-				validatedCandidates = append(validatedCandidates, candidate)
+				// confirmed: activation_score >= threshold 且有 strong_signal
+				confirmedCandidates = append(confirmedCandidates, candidate)
+			} else if probeResult.ActivationScore >= weakActivationThreshold ||
+				len(probeResult.WeakSignals) > 0 {
+				// probable: activation_score >= weak_threshold 或存在 weak_signal
+				probableCandidates = append(probableCandidates, candidate)
 			}
 		}
+
 		// 记录候选信息
 		result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
 			Timestamp: time.Now(),
@@ -1056,35 +1110,65 @@ func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef,
 				"candidate_index":    strconv.Itoa(i),
 				"score":              strconv.Itoa(candidate.Score),
 				"activation_score":   fmt.Sprintf("%.2f", candidate.ActivationScore),
+				"strong_signals":     strconv.Itoa(len(probeResult.StrongSignals)),
+				"weak_signals":       strconv.Itoa(len(probeResult.WeakSignals)),
 			},
 		})
 	}
 
-	if len(validatedCandidates) == 0 {
-		result.Failed = true
-		result.ReasonCode = adapter.ReasonInputBoxNotConfident
-		result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
-			Timestamp: time.Now(),
-			Level:     "error",
-			Message:   "No candidate meets threshold in Stage A",
-			Context: map[string]string{
-				"stage":                 "A",
-				"candidate_count":       strconv.Itoa(len(candidates)),
-				"validated_count":       "0",
-				"activation_threshold":  fmt.Sprintf("%.1f", activationScoreThreshold),
-				"min_strong_signals":    strconv.Itoa(minStrongSignals),
-			},
-		})
-		return result
-	}
+	// 记录候选统计
+	result.CandidateCount = len(candidates)
+	result.ValidatedCount = len(confirmedCandidates) + len(probableCandidates)
 
 	// 选择最佳候选
-	bestCandidate := validatedCandidates[0]
-	bestIndex := 0
-	for i, candidate := range validatedCandidates {
-		if candidate.ActivationScore > bestCandidate.ActivationScore {
-			bestCandidate = candidate
-			bestIndex = i
+	var bestCandidate windows.InputBoxCandidate
+	var bestIndex int
+	var confidenceLevel string
+	var selectionReason string
+
+	if len(confirmedCandidates) > 0 {
+		// 优先选择 confirmed 候选
+		bestCandidate = confirmedCandidates[0]
+		bestIndex = candidatesIndex(allCandidates, bestCandidate)
+		confidenceLevel = "confirmed"
+		selectionReason = "meets_threshold_with_strong_signals"
+
+		// 选择 activation_score 最高的 confirmed 候选
+		for _, candidate := range confirmedCandidates {
+			if candidate.ActivationScore > bestCandidate.ActivationScore {
+				bestCandidate = candidate
+				bestIndex = candidatesIndex(allCandidates, candidate)
+			}
+		}
+	} else if len(probableCandidates) > 0 {
+		// 选择 probable 候选中 activation_score 最高的
+		bestCandidate = probableCandidates[0]
+		bestIndex = candidatesIndex(allCandidates, bestCandidate)
+		confidenceLevel = "probable"
+		selectionReason = "weak_activation_or_signals"
+
+		for _, candidate := range probableCandidates {
+			if candidate.ActivationScore > bestCandidate.ActivationScore {
+				bestCandidate = candidate
+				bestIndex = candidatesIndex(allCandidates, candidate)
+			}
+		}
+	} else {
+		// fallback: 选择 score 最高且位于底部区域的候选
+		bestIndex = 0
+		bestCandidate = allCandidates[0]
+		confidenceLevel = "fallback"
+		selectionReason = "highest_score_in_bottom_area"
+
+		// 优先选择位于底部区域的候选（y坐标较大）
+		for i, candidate := range allCandidates {
+			if candidate.Rect.Y > bestCandidate.Rect.Y {
+				bestCandidate = candidate
+				bestIndex = i
+			} else if candidate.Rect.Y == bestCandidate.Rect.Y && candidate.Score > bestCandidate.Score {
+				bestCandidate = candidate
+				bestIndex = i
+			}
 		}
 	}
 
@@ -1097,18 +1181,32 @@ func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef,
 	result.StrongSignals = probeStrongSignals(a.bridge, conv.HostWindowHandle, bestCandidate)
 	result.SelectionStrategy = "input_left_quarter"
 	result.BeforeClickScreenshot = beforeClickScreenshot
+	result.ConfidenceLevel = confidenceLevel
+	result.SelectionReason = selectionReason
+	result.AllCandidates = allCandidates
+
+	// 根据置信度级别记录不同的诊断信息
+	logLevel := "info"
+	if confidenceLevel == "fallback" {
+		logLevel = "warning"
+	}
 
 	result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
 		Timestamp: time.Now(),
-		Level:     "info",
-		Message:   "Stage A completed successfully",
+		Level:     logLevel,
+		Message:   fmt.Sprintf("Stage A completed with confidence level: %s", confidenceLevel),
 		Context: map[string]string{
 			"stage":                 "A",
+			"confidence_level":      confidenceLevel,
+			"selection_reason":      selectionReason,
 			"best_candidate_index":  strconv.Itoa(bestIndex),
 			"input_box_rect":        fmt.Sprintf("%v", bestCandidate.Rect),
 			"activation_score":      fmt.Sprintf("%.2f", bestCandidate.ActivationScore),
 			"strong_signals":        fmt.Sprintf("%v", result.StrongSignals),
 			"selection_strategy":    result.SelectionStrategy,
+			"candidate_count":       strconv.Itoa(len(candidates)),
+			"confirmed_count":       strconv.Itoa(len(confirmedCandidates)),
+			"probable_count":        strconv.Itoa(len(probableCandidates)),
 		},
 	})
 
@@ -1131,116 +1229,155 @@ func (a *WeChatAdapter) stageBTextInjection(conv protocol.ConversationRef, conte
 	beforeScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
 	result.BeforeScreenshot = beforeScreenshot
 
-	// 点击输入框（固定使用 input_left_quarter 策略）
-	clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(stageA.InputBoxRect, "input_left_quarter")
-	clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
-	if clickResult.Status != adapter.StatusSuccess {
+	// 如果 Stage A 是 confirmed 级别，直接使用最佳候选
+	// 如果是 probable/fallback 级别，尝试多个候选
+	var candidatesToTry []windows.InputBoxCandidate
+	if stageA.ConfidenceLevel == "confirmed" {
+		candidatesToTry = []windows.InputBoxCandidate{stageA.AllCandidates[stageA.BestCandidateIndex]}
+	} else {
+		// 尝试所有候选（按优先级排序）
+		candidatesToTry = stageA.AllCandidates
+	}
+
+	// 多候选串行尝试
+	var attemptChain []map[string]string
+	textInjectionSuccess := false
+	var selectedIndex int
+	var selectedClickX, selectedClickY int
+	var selectedClickSource string
+
+	for i, candidate := range candidatesToTry {
+		attemptInfo := map[string]string{
+			"attempt_index":    strconv.Itoa(i),
+			"candidate_rect":   fmt.Sprintf("%v", candidate.Rect),
+			"candidate_score":  strconv.Itoa(candidate.Score),
+			"activation_score": fmt.Sprintf("%.2f", candidate.ActivationScore),
+		}
+
+		// 点击候选输入框
+		clickX, clickY, clickSource := a.bridge.GetInputBoxClickPoint(candidate.Rect, "input_left_quarter")
+		clickResult := a.bridge.Click(conv.HostWindowHandle, clickX, clickY)
+
+		if clickResult.Status != adapter.StatusSuccess {
+			attemptInfo["result"] = "click_failed"
+			attemptInfo["error"] = clickResult.Error
+			attemptChain = append(attemptChain, attemptInfo)
+			continue
+		}
+
+		time.Sleep(200 * time.Millisecond)
+
+		// 设置剪贴板文本
+		setResult := a.bridge.SetClipboardText(content)
+		if setResult.Status != adapter.StatusSuccess {
+			attemptInfo["result"] = "clipboard_failed"
+			attemptInfo["error"] = setResult.Error
+			attemptChain = append(attemptChain, attemptInfo)
+			continue
+		}
+
+		// 粘贴文本 (Ctrl+V)
+		pasteResult := a.bridge.SendKeys(conv.HostWindowHandle, "^v")
+		if pasteResult.Status != adapter.StatusSuccess {
+			attemptInfo["result"] = "paste_failed"
+			attemptInfo["error"] = pasteResult.Error
+			attemptChain = append(attemptChain, attemptInfo)
+			continue
+		}
+
+		time.Sleep(50 * time.Millisecond)
+
+		// 截图输入框点击后
+		afterScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
+
+		// 检测输入区域变化
+		diff := windows.CalculateRectDiffPercent(beforeScreenshot, afterScreenshot,
+			stageA.WindowWidth, stageA.WindowHeight, candidate.Rect)
+
+		// 判定输入框是否有效（最终判定移到 Stage B）
+		inputAreaChanged := diff > 0.01
+		inputPreviewDetected := inputAreaChanged && diff > 0.03
+
+		if inputAreaChanged {
+			attemptInfo["result"] = "success"
+			attemptInfo["area_diff"] = fmt.Sprintf("%.3f", diff)
+			attemptInfo["input_area_changed"] = "true"
+			attemptInfo["input_preview_detected"] = strconv.FormatBool(inputPreviewDetected)
+
+			textInjectionSuccess = true
+			selectedIndex = i
+			selectedClickX = clickX
+			selectedClickY = clickY
+			selectedClickSource = clickSource
+			result.AfterPasteScreenshot = afterScreenshot
+			result.InputAreaChanged = inputAreaChanged
+			result.InputPreviewDetected = inputPreviewDetected
+			result.DiffPercent = diff
+
+			// 添加弱信号和强信号检测
+			if diff > 0.01 {
+				weakSignal := fmt.Sprintf("input_area_changed:%.3f", diff)
+				result.WeakSignals = append(result.WeakSignals, weakSignal)
+			}
+			if diff > 0.05 {
+				strongSignal := fmt.Sprintf("significant_input_change:%.3f", diff)
+				result.StrongSignals = append(result.StrongSignals, strongSignal)
+			}
+			if inputPreviewDetected {
+				strongSignal := "input_preview_detected"
+				result.StrongSignals = append(result.StrongSignals, strongSignal)
+			}
+
+			break // 成功，退出循环
+		} else {
+			attemptInfo["result"] = "no_input_change"
+			attemptInfo["area_diff"] = fmt.Sprintf("%.3f", diff)
+		}
+
+		attemptChain = append(attemptChain, attemptInfo)
+	}
+
+	// 记录尝试链路
+	result.AttemptChain = attemptChain
+	result.TextInjectionSuccess = textInjectionSuccess
+
+	if !textInjectionSuccess {
 		result.Failed = true
 		result.ReasonCode = adapter.ReasonTextInjectionFailed
 		result.Diagnostics = []adapter.Diagnostic{
 			{
 				Timestamp: time.Now(),
 				Level:     "error",
-				Message:   "Click failed in Stage B",
+				Message:   "Text injection failed: no candidate worked",
 				Context: map[string]string{
-					"stage": "B",
-					"error": clickResult.Error,
+					"stage":          "B",
+					"attempt_count":  strconv.Itoa(len(attemptChain)),
+					"confidence_lvl": stageA.ConfidenceLevel,
 				},
 			},
 		}
 		return result
 	}
-	time.Sleep(200 * time.Millisecond)
 
+	// 成功注入文本
 	result.TextInjectionAttempted = true
 	result.TextInjectionMethod = "clipboard_paste"
 
-	// 设置剪贴板文本
-	setResult := a.bridge.SetClipboardText(content)
-	if setResult.Status != adapter.StatusSuccess {
-		result.Failed = true
-		result.ReasonCode = adapter.ReasonTextInjectionFailed
-		result.Diagnostics = []adapter.Diagnostic{
-			{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   "Set clipboard failed in Stage B",
-				Context: map[string]string{
-					"stage": "B",
-					"error": setResult.Error,
-				},
-			},
-		}
-		return result
-	}
-
-	// 粘贴文本 (Ctrl+V)
-	pasteResult := a.bridge.SendKeys(conv.HostWindowHandle, "^v")
-	if pasteResult.Status != adapter.StatusSuccess {
-		result.Failed = true
-		result.ReasonCode = adapter.ReasonTextInjectionFailed
-		result.Diagnostics = []adapter.Diagnostic{
-			{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   "Paste failed in Stage B",
-				Context: map[string]string{
-					"stage": "B",
-					"error": pasteResult.Error,
-				},
-			},
-		}
-		return result
-	}
-	time.Sleep(50 * time.Millisecond)
-
-	// 截图输入框点击后
-	afterScreenshot, _ := a.bridge.CaptureWindow(conv.HostWindowHandle)
-	result.AfterPasteScreenshot = afterScreenshot
-
-	// 检测输入区域变化
-	diff := windows.CalculateRectDiffPercent(beforeScreenshot, afterScreenshot,
-		stageA.WindowWidth, stageA.WindowHeight, stageA.InputBoxRect)
-	result.InputAreaChanged = diff > 0.01
-	result.InputPreviewDetected = result.InputAreaChanged
-
-	// 添加弱信号和强信号检测
-	// 弱信号：输入区域变化 > 1%
-	if diff > 0.01 {
-		weakSignal := fmt.Sprintf("input_area_changed:%.3f", diff)
-		result.WeakSignals = append(result.WeakSignals, weakSignal)
-	}
-
-	// 强信号：输入区域变化 > 5%（显著视觉变化）
-	if diff > 0.05 {
-		strongSignal := fmt.Sprintf("significant_input_change:%.3f", diff)
-		result.StrongSignals = append(result.StrongSignals, strongSignal)
-	}
-
-	// 强信号：输入预览检测（文本出现在输入框中）
-	// 由于无法使用OCR，我们使用视觉变化作为代理指标
-	if result.InputPreviewDetected && diff > 0.03 {
-		strongSignal := "input_preview_detected"
-		result.StrongSignals = append(result.StrongSignals, strongSignal)
-	}
-
-	// 成功判定：需要至少1个强信号
-	result.TextInjectionSuccess = len(result.StrongSignals) > 0
-
+	// 记录成功信息
 	result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
 		Timestamp: time.Now(),
 		Level:     "info",
-		Message:   "Stage B completed successfully",
+		Message:   "Stage B text injection successful",
 		Context: map[string]string{
 			"stage":                    "B",
-			"click_x":                  strconv.Itoa(clickX),
-			"click_y":                  strconv.Itoa(clickY),
-			"click_source":             clickSource,
+			"selected_candidate_index": strconv.Itoa(selectedIndex),
+			"click_x":                  strconv.Itoa(selectedClickX),
+			"click_y":                  strconv.Itoa(selectedClickY),
+			"click_source":             selectedClickSource,
 			"text_injection_method":    result.TextInjectionMethod,
-			"text_injection_success":   strconv.FormatBool(result.TextInjectionSuccess),
 			"input_area_changed":       strconv.FormatBool(result.InputAreaChanged),
 			"input_preview_detected":   strconv.FormatBool(result.InputPreviewDetected),
-			"area_diff":                fmt.Sprintf("%.3f", diff),
+			"area_diff":                fmt.Sprintf("%.3f", result.DiffPercent),
 			"weak_signals_count":       strconv.Itoa(len(result.WeakSignals)),
 			"strong_signals_count":     strconv.Itoa(len(result.StrongSignals)),
 		},
