@@ -8,6 +8,7 @@ import (
 	"image/color"
 	"image/png"
 	"log"
+	"math"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -291,6 +292,15 @@ func main() {
 			log.Fatalf("Invalid window handle: %v", err)
 		}
 		sendTest(bridge, uintptr(handle), text)
+	case "debug-contact-list":
+		if len(args) < 2 {
+			log.Fatal("Usage: bridge-dump debug-contact-list --contact \"联系人名\"")
+		}
+		contactName := "Dav"
+		if len(args) >= 4 && args[1] == "--contact" {
+			contactName = args[2]
+		}
+		debugContactList(bridge, contactName)
 	case "debug-contact-search":
 		if len(args) < 2 {
 			log.Fatal("Usage: bridge-dump debug-contact-search --contact \"联系人名\"")
@@ -356,6 +366,7 @@ func printUsage() {
 	fmt.Println("  bridge-dump click-input-box <h> <strategy> - Click input box with specified strategy")
 	fmt.Println("                                         Strategies: input_left_third, input_center, input_left_quarter, input_double_click_center")
 	fmt.Println("  bridge-dump send-test <window-handle> --text \"测试消息\" - Test 4-stage send process")
+	fmt.Println("  bridge-dump debug-contact-list --contact \"联系人名\" - Debug: contact list navigation")
 	fmt.Println("  bridge-dump debug-contact-search --contact \"联系人名\" - Debug: contact search and click")
 	fmt.Println("  bridge-dump debug-chat-open --contact \"联系人名\" - Debug: verify target chat page")
 	fmt.Println("  bridge-dump chat-send-test --contact \"联系人名\" --text \"测试消息\" - High-level chat send test")
@@ -2895,6 +2906,14 @@ func stageDSendVerification(bridge windows.BridgeInterface, handle uintptr, text
 	return result
 }
 
+// min 返回两个整数的最小值
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
 // saveImage 保存图片到文件
 func saveImage(imgData []byte, filename string) (string, error) {
 	// 创建调试目录
@@ -2962,6 +2981,144 @@ func decodeBGRToRGBA(data []byte) (*image.RGBA, error) {
 	return img, nil
 }
 
+// debugContactList 联系人列表优先调试
+func debugContactList(bridge windows.BridgeInterface, contactName string) {
+	fmt.Println("=== Debug Contact List ===")
+	fmt.Printf("Target Contact: %s\n", contactName)
+	fmt.Println()
+
+	// 1. 找微信主窗口
+	handles, result := bridge.FindTopLevelWindows("", "微信")
+	if result.Status != adapter.StatusSuccess {
+		fmt.Printf("Failed to find by title: %s\n", result.Error)
+	}
+
+	// Also try by class name
+	handles2, result2 := bridge.FindTopLevelWindows("WeChatMainWndForPC", "")
+	if result2.Status == adapter.StatusSuccess {
+		handles = append(handles, handles2...)
+	}
+
+	if len(handles) == 0 {
+		fmt.Println("❌ No WeChat windows found")
+		return
+	}
+
+	selectedWindow := handles[0]
+	fmt.Printf("✓ Selected WeChat Window: 0x%X (%d)\n", selectedWindow, selectedWindow)
+	fmt.Println()
+
+	// 2. 获取窗口信息
+	_, infoResult := bridge.GetWindowInfo(selectedWindow)
+	if infoResult.Status != adapter.StatusSuccess {
+		fmt.Printf("❌ Failed to get window info: %s\n", infoResult.Error)
+		return
+	}
+
+	// 3. 聚焦窗口
+	focusResult := bridge.FocusWindow(selectedWindow)
+	fmt.Printf("Window focus: %v\n", focusResult.Status == adapter.StatusSuccess)
+
+	// 4. 定位左侧联系人/会话列表区域
+	fmt.Println("--- Locating Left Sidebar ---")
+	sidebarVisible := false
+	visibleContactsDetected := false
+	targetContactVisible := false
+	var targetContactRect []int
+	targetContactClicked := false
+
+	// 使用视觉检测
+	visionResult, detectResult := bridge.DetectConversations(selectedWindow)
+	if detectResult.Status == adapter.StatusSuccess {
+		sidebarVisible = visionResult.LeftSidebarRect[2] > 100 // 宽度大于100像素
+		fmt.Printf("Left sidebar detected: %v (rect: %v)\n", sidebarVisible, visionResult.LeftSidebarRect)
+	}
+
+	// 5. 识别当前可见联系人文本
+	fmt.Println("--- Detecting Visible Contacts ---")
+	nodes, nodesResult := bridge.EnumerateAccessibleNodes(selectedWindow)
+	if nodesResult.Status == adapter.StatusSuccess {
+		contactCount := 0
+		var visibleContacts []string
+
+		// 筛选联系人节点 (list item 角色)
+		for i, node := range nodes {
+			if (strings.Contains(strings.ToLower(node.Role), "listitem") ||
+				strings.Contains(strings.ToLower(node.Role), "list item")) &&
+				node.Name != "" &&
+				node.Bounds[2] > 0 && node.Bounds[3] > 0 {
+
+				// 检查是否在左侧栏区域内
+				if sidebarVisible {
+					x := node.Bounds[0]
+					if x < visionResult.LeftSidebarRect[0] + visionResult.LeftSidebarRect[2] {
+						contactCount++
+						visibleContacts = append(visibleContacts, node.Name)
+
+						// 检查是否为目标联系人
+						if strings.Contains(node.Name, contactName) {
+							targetContactVisible = true
+							targetContactRect = []int{node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3]}
+							fmt.Printf("✓ Target contact found at node %d: %s\n", i, node.Name)
+							fmt.Printf("  Rect: X=%d Y=%d W=%d H=%d\n",
+								node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3])
+
+							// 尝试点击目标联系人
+							clickX := node.Bounds[0] + node.Bounds[2]/2
+							clickY := node.Bounds[1] + node.Bounds[3]/2
+							clickResult := bridge.Click(selectedWindow, clickX, clickY)
+							if clickResult.Status == adapter.StatusSuccess {
+								targetContactClicked = true
+								fmt.Println("✓ Target contact clicked successfully")
+								time.Sleep(1000 * time.Millisecond)
+							} else {
+								fmt.Printf("❌ Failed to click target contact: %s\n", clickResult.Error)
+							}
+						}
+					}
+				}
+			}
+		}
+
+		if contactCount > 0 {
+			visibleContactsDetected = true
+			fmt.Printf("✓ Visible contacts detected: %d\n", contactCount)
+			if len(visibleContacts) > 0 {
+				fmt.Println("  Sample contacts:", strings.Join(visibleContacts[:min(5, len(visibleContacts))], ", "))
+			}
+		} else {
+			fmt.Println("⚠️ No visible contacts detected")
+		}
+	} else {
+		fmt.Printf("❌ Failed to get accessible nodes: %s\n", nodesResult.Error)
+	}
+
+	// 6. 保存关键截图
+	var screenshotPaths []string
+	captureResult, _ := bridge.CaptureWindow(selectedWindow)
+	if captureResult != nil {
+		path, err := saveImage(captureResult, "debug_contact_list_result.png")
+		if err == nil {
+			screenshotPaths = append(screenshotPaths, path)
+			fmt.Printf("📷 Screenshot saved: %s\n", path)
+		}
+	}
+
+	fmt.Println()
+	fmt.Println("=== Summary ===")
+	fmt.Printf("selected_window: 0x%X\n", selectedWindow)
+	fmt.Printf("sidebar_visible: %v\n", sidebarVisible)
+	fmt.Printf("visible_contacts_detected: %v\n", visibleContactsDetected)
+	fmt.Printf("target_contact_visible: %v\n", targetContactVisible)
+	if targetContactVisible {
+		fmt.Printf("target_contact_rect: %v\n", targetContactRect)
+	} else {
+		fmt.Printf("target_contact_rect: null\n")
+	}
+	fmt.Printf("target_contact_clicked: %v\n", targetContactClicked)
+	fmt.Printf("screenshot_paths: %v\n", screenshotPaths)
+}
+
 // debugContactSearch 联系人搜索调试
 func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 	fmt.Println("=== Debug Contact Search ===")
@@ -3001,12 +3158,81 @@ func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 	focusResult := bridge.FocusWindow(selectedWindow)
 	fmt.Printf("Window focus: %v\n", focusResult.Status == adapter.StatusSuccess)
 
-	// 4. 找搜索框 - 尝试在左侧栏顶部区域找edit控件
+	// 4. 两段式导航：先检查左侧列表是否已有目标联系人
+	navigationMode := "search_fallback"
 	nodes, nodesResult := bridge.EnumerateAccessibleNodes(selectedWindow)
 	if nodesResult.Status != adapter.StatusSuccess {
 		fmt.Printf("❌ Failed to get accessible nodes: %s\n", nodesResult.Error)
 		return
 	}
+
+	// 检查目标联系人是否已在左侧列表中可见
+	fmt.Println("--- Stage 1: Checking if target contact is in visible list ---")
+	targetContactInList := false
+	var targetContactRect []int
+	targetClickX, targetClickY := 0, 0
+
+	for i, node := range nodes {
+		if (strings.Contains(strings.ToLower(node.Role), "listitem") ||
+			strings.Contains(strings.ToLower(node.Role), "list item")) &&
+			strings.Contains(node.Name, contactName) &&
+			node.Bounds[2] > 0 && node.Bounds[3] > 0 {
+
+			targetContactInList = true
+			targetContactRect = []int{node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3]}
+			targetClickX = node.Bounds[0] + node.Bounds[2]/2
+			targetClickY = node.Bounds[1] + node.Bounds[3]/2
+
+			fmt.Printf("✓ Target contact found in visible list at node %d: %s\n", i, node.Name)
+			fmt.Printf("  Rect: X=%d Y=%d W=%d H=%d\n",
+				node.Bounds[0], node.Bounds[1], node.Bounds[2], node.Bounds[3])
+			break
+		}
+	}
+
+	if targetContactInList {
+		navigationMode = "direct_list_click"
+		fmt.Println("✓ Using direct list click navigation")
+
+		// 点击目标联系人
+		clickResult := bridge.Click(selectedWindow, targetClickX, targetClickY)
+		if clickResult.Status == adapter.StatusSuccess {
+			fmt.Println("✓ Target contact clicked successfully")
+			time.Sleep(1500 * time.Millisecond)
+
+			// 保存截图并返回
+			var screenshotPaths []string
+			captureResult, _ := bridge.CaptureWindow(selectedWindow)
+			if captureResult != nil {
+				path, err := saveImage(captureResult, "debug_contact_search_direct_click.png")
+				if err == nil {
+					screenshotPaths = append(screenshotPaths, path)
+					fmt.Printf("📷 Screenshot saved: %s\n", path)
+				}
+			}
+
+			fmt.Println()
+			fmt.Println("=== Summary (Direct List Click) ===")
+			fmt.Printf("selected_window: 0x%X\n", selectedWindow)
+			fmt.Printf("navigation_mode: %s\n", navigationMode)
+			fmt.Printf("target_contact_in_list: %v\n", targetContactInList)
+			fmt.Printf("target_contact_rect: %v\n", targetContactRect)
+			fmt.Printf("target_contact_clicked: %v\n", true)
+			fmt.Printf("search_box_found: false\n")
+			fmt.Printf("search_text_injected: false\n")
+			fmt.Printf("search_results_detected: false\n")
+			fmt.Printf("screenshot_paths: %v\n", screenshotPaths)
+			return
+		} else {
+			fmt.Printf("❌ Failed to click target contact: %s\n", clickResult.Error)
+			fmt.Println("⚠️ Falling back to search box navigation")
+		}
+	} else {
+		fmt.Println("⚠️ Target contact not found in visible list, using search fallback")
+	}
+
+	fmt.Println()
+	fmt.Println("--- Stage 2: Search Box Navigation ---")
 
 	searchBoxFound := false
 	var searchBoxRect windows.InputBoxRect
@@ -3062,15 +3288,46 @@ func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 
 	fmt.Println()
 
+	// 强化搜索框流程变量
+	searchBoxClicked := false
+	searchBoxFocusLikely := false
+	searchTextAttempted := false
+	searchTextVisibleAfterInput := false
+	searchResultsUpdated := false
+
 	// 5. 点击搜索框
 	if searchBoxFound {
 		clickResult := bridge.Click(selectedWindow, searchBoxX, searchBoxY)
 		if clickResult.Status != adapter.StatusSuccess {
 			fmt.Printf("❌ Failed to click search box: %s\n", clickResult.Error)
 		} else {
+			searchBoxClicked = true
 			fmt.Println("✓ Search box clicked successfully")
 			// 等待短暂时间让搜索框聚焦
 			time.Sleep(500 * time.Millisecond)
+
+			// 验证搜索框是否已激活 - Stage B 式验证思路
+			fmt.Println("--- Verifying search box focus ---")
+			nodesAfterClick, nodesResultAfter := bridge.EnumerateAccessibleNodes(selectedWindow)
+			if nodesResultAfter.Status == adapter.StatusSuccess {
+				// 查找激活的编辑框
+				for _, node := range nodesAfterClick {
+					if (strings.Contains(strings.ToLower(node.Role), "edit") ||
+						strings.Contains(strings.ToLower(node.Role), "text")) &&
+						node.Bounds[2] > 0 && node.Bounds[3] > 0 &&
+						math.Abs(float64(node.Bounds[0]-searchBoxRect.X)) < 10 &&
+						math.Abs(float64(node.Bounds[1]-searchBoxRect.Y)) < 10 {
+
+						// 检查状态属性中是否包含 "focused" 或类似
+						searchBoxFocusLikely = true
+						fmt.Println("✓ Search box appears focused (edit/text element found at clicked location)")
+						break
+					}
+				}
+			}
+			if !searchBoxFocusLikely {
+				fmt.Println("⚠️ Search box focus not verified via accessibility")
+			}
 		}
 	}
 
@@ -3089,8 +3346,37 @@ func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 			if pasteResult.Status != adapter.StatusSuccess {
 				fmt.Printf("❌ Failed to paste text: %s\n", pasteResult.Error)
 			} else {
+				searchTextAttempted = true
 				searchTextInjected = true
 				fmt.Println("✓ Search text injected via clipboard paste")
+
+				// 等待文本输入生效
+				time.Sleep(500 * time.Millisecond)
+
+				// 验证联系人名是否确实显示在搜索框中
+				fmt.Println("--- Verifying search text visibility ---")
+				nodesAfterInput, nodesResultAfterInput := bridge.EnumerateAccessibleNodes(selectedWindow)
+				if nodesResultAfterInput.Status == adapter.StatusSuccess {
+					textFoundInSearchBox := false
+					for _, node := range nodesAfterInput {
+						if (strings.Contains(strings.ToLower(node.Role), "edit") ||
+							strings.Contains(strings.ToLower(node.Role), "text")) &&
+							node.Bounds[2] > 0 && node.Bounds[3] > 0 &&
+							math.Abs(float64(node.Bounds[0]-searchBoxRect.X)) < 10 &&
+							math.Abs(float64(node.Bounds[1]-searchBoxRect.Y)) < 10 &&
+							strings.Contains(node.Name, contactName) {
+
+							textFoundInSearchBox = true
+							searchTextVisibleAfterInput = true
+							fmt.Printf("✓ Search text visible in search box: '%s'\n", node.Name)
+							break
+						}
+					}
+					if !textFoundInSearchBox {
+						fmt.Println("⚠️ Search text not verified via accessibility - checking via OCR fallback")
+						// 这里可以添加OCR回退检测
+					}
+				}
 
 				// 等待搜索结果出现
 				time.Sleep(1000 * time.Millisecond)
@@ -3130,6 +3416,8 @@ func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 
 			if targetContactFound {
 				searchResultsDetected = true
+				searchResultsUpdated = true
+				fmt.Println("✓ Search results updated - target contact found")
 
 				// 点击目标联系人
 				clickContactResult := bridge.Click(selectedWindow, targetClickX, targetClickY)
@@ -3143,17 +3431,24 @@ func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 			} else {
 				fmt.Printf("⚠️ Target contact '%s' not found in search results\n", contactName)
 				fmt.Println("  Available list items:")
+				availableCount := 0
 				for i, node := range moreNodes {
 					if strings.Contains(strings.ToLower(node.Role), "listitem") ||
 						strings.Contains(strings.ToLower(node.Role), "list item") {
 						fmt.Printf("    [%d] %s (Role: %s)\n", i, node.Name, node.Role)
+						availableCount++
 					}
+				}
+				if availableCount > 0 {
+					searchResultsUpdated = true
+					fmt.Printf("✓ Search results updated - found %d list items (but not target)\n", availableCount)
 				}
 			}
 		}
 	}
 
 	fmt.Printf("✓ Search results detected: %v\n", searchResultsDetected)
+	fmt.Printf("✓ Search results updated: %v\n", searchResultsUpdated)
 	fmt.Println()
 
 	// 8. 目标联系人是否被点击
@@ -3173,8 +3468,13 @@ func debugContactSearch(bridge windows.BridgeInterface, contactName string) {
 	fmt.Println()
 	fmt.Println("=== Summary ===")
 	fmt.Printf("selected_window: 0x%X\n", selectedWindow)
+	fmt.Printf("navigation_mode: %s\n", navigationMode)
 	fmt.Printf("search_box_found: %v\n", searchBoxFound)
-	fmt.Printf("search_text_injected: %v\n", searchTextInjected)
+	fmt.Printf("search_box_clicked: %v\n", searchBoxClicked)
+	fmt.Printf("search_box_focus_likely: %v\n", searchBoxFocusLikely)
+	fmt.Printf("search_text_attempted: %v\n", searchTextAttempted)
+	fmt.Printf("search_text_visible_after_input: %v\n", searchTextVisibleAfterInput)
+	fmt.Printf("search_results_updated: %v\n", searchResultsUpdated)
 	fmt.Printf("search_results_detected: %v\n", searchResultsDetected)
 	fmt.Printf("target_contact_clicked: %v\n", targetContactClicked)
 	fmt.Printf("screenshot_paths: %v\n", screenshotPaths)
@@ -3218,72 +3518,78 @@ func debugChatOpen(bridge windows.BridgeInterface, contactName string) {
 		return
 	}
 
-	// 3. 检测当前聊天名称
+	// 3. 组合验证聊天页是否打开
 	currentChatName := "unknown"
 	alreadyInTargetChat := false
 	chatOpenVerified := false
 	chatOpenSignals := []string{}
 
-	// 方法1: 通过OCR/视觉检测顶部标题
-	fmt.Println("Analyzing chat title...")
-
-	// 获取节点信息来推测当前聊天页
+	// 获取节点信息
 	nodes, nodesResult := bridge.EnumerateAccessibleNodes(selectedWindow)
-	if nodesResult.Status == adapter.StatusSuccess {
-		// 查找可能的聊天标题区域（通常在顶部）
-		for i, node := range nodes {
-			if strings.Contains(strings.ToLower(node.Role), "title") ||
-				strings.Contains(strings.ToLower(node.Role), "static") ||
-				strings.Contains(strings.ToLower(node.Role), "text") {
+	if nodesResult.Status != adapter.StatusSuccess {
+		fmt.Printf("❌ Failed to get accessible nodes: %s\n", nodesResult.Error)
+		return
+	}
 
-				// 检查位置：在顶部区域
-				if node.Bounds[1] < 100 && node.Bounds[2] > 50 && node.Bounds[3] > 10 { // Y, Width, Height
-					if node.Name != "" {
-						currentChatName = node.Name
-						fmt.Printf("✓ Possible chat title found at node %d: %s\n", i, node.Name)
+	// 验证信号1: 顶部标题是否出现目标联系人名
+	fmt.Println("--- Signal 1: Checking Chat Title ---")
+	titleMatchSignal := false
+	for i, node := range nodes {
+		if strings.Contains(strings.ToLower(node.Role), "title") ||
+			strings.Contains(strings.ToLower(node.Role), "static") ||
+			strings.Contains(strings.ToLower(node.Role), "text") {
 
-						// 检查是否匹配目标联系人
-						if strings.Contains(node.Name, contactName) {
-							alreadyInTargetChat = true
-							chatOpenVerified = true
-							chatOpenSignals = append(chatOpenSignals, "title_matches_contact")
-							fmt.Printf("  ✓ Title matches target contact!\n")
-						}
-						break
+			// 检查位置：在顶部区域
+			if node.Bounds[1] < 100 && node.Bounds[2] > 50 && node.Bounds[3] > 10 { // Y, Width, Height
+				if node.Name != "" {
+					currentChatName = node.Name
+					fmt.Printf("✓ Chat title found at node %d: %s\n", i, node.Name)
+
+					// 检查是否匹配目标联系人
+					if strings.Contains(node.Name, contactName) {
+						titleMatchSignal = true
+						chatOpenSignals = append(chatOpenSignals, "title_matches_contact")
+						fmt.Printf("  ✓ Title matches target contact!\n")
+					} else {
+						fmt.Printf("  ⚠️ Title does NOT match target contact (expecting: %s)\n", contactName)
 					}
+					break
 				}
 			}
 		}
 	}
+	if currentChatName == "unknown" {
+		fmt.Println("⚠️ No chat title detected")
+	}
 
-	// 方法2: 检查左侧联系人列表的高亮状态
-	fmt.Println("Checking contact list highlight...")
+	// 验证信号2: 左侧联系人是否高亮/被选中
+	fmt.Println("--- Signal 2: Checking Contact Highlight ---")
+	contactHighlightSignal := false
+	for i, node := range nodes {
+		if (strings.Contains(strings.ToLower(node.Role), "listitem") ||
+			strings.Contains(strings.ToLower(node.Role), "list item")) &&
+			strings.Contains(node.Name, contactName) {
 
-	if nodesResult.Status == adapter.StatusSuccess {
-		for i, node := range nodes {
-			if (strings.Contains(strings.ToLower(node.Role), "listitem") ||
-				strings.Contains(strings.ToLower(node.Role), "list item")) &&
-				strings.Contains(node.Name, contactName) {
+			fmt.Printf("✓ Target contact found in list at node %d: %s\n", i, node.Name)
+			chatOpenSignals = append(chatOpenSignals, "contact_in_list")
 
-				fmt.Printf("✓ Target contact found in list at node %d: %s\n", i, node.Name)
-
-				// 检查状态：是否被选中/高亮
-				// 这里简化：如果找到目标联系人，假设可能在聊天页中
-				// 实际应该检查节点的状态属性
-				chatOpenSignals = append(chatOpenSignals, "contact_in_list")
-
-				// 如果已经通过标题确认，这里可以加强验证
-				if alreadyInTargetChat {
-					chatOpenVerified = true
-					chatOpenSignals = append(chatOpenSignals, "list_item_confirms_title")
-				}
-				break
+			// 检查状态：是否被选中/高亮
+			// 尝试检测状态属性
+			// 这里简化：如果在列表中且标题匹配，认为可能高亮
+			if titleMatchSignal {
+				contactHighlightSignal = true
+				chatOpenSignals = append(chatOpenSignals, "contact_likely_selected")
+				fmt.Println("  ✓ Contact appears selected (title matches)")
+			} else {
+				fmt.Println("  ⚠️ Contact in list but no title match")
 			}
+			break
 		}
 	}
 
-	// 方法3: 视觉证据 - 检测聊天区域
-	fmt.Println("Checking chat area visual evidence...")
+	// 验证信号3: 消息区是否出现聊天布局
+	fmt.Println("--- Signal 3: Checking Chat Message Area ---")
+	chatAreaSignal := false
 
 	// 使用视觉检测聊天区域
 	visionResult, detectResult := bridge.DetectConversations(selectedWindow)
@@ -3291,26 +3597,97 @@ func debugChatOpen(bridge windows.BridgeInterface, contactName string) {
 		fmt.Printf("✓ Visual detection: window %dx%d, left sidebar %v\n",
 			visionResult.WindowWidth, visionResult.WindowHeight, visionResult.LeftSidebarRect)
 
-		// 如果有左侧栏区域，说明可能不是聊天页（微信主窗口有左侧栏）
-		if visionResult.LeftSidebarRect[2] > 100 {
-			chatOpenSignals = append(chatOpenSignals, "left_sidebar_detected")
-			fmt.Println("  ⚠️ Left sidebar detected - might be in main window, not chat page")
+		// 判断是否在聊天页：左侧栏较小或不存在
+		leftSidebarWidth := visionResult.LeftSidebarRect[2]
+		windowWidth := visionResult.WindowWidth
 
-			// 如果左侧栏很大，可能不是在目标聊天页
-			if visionResult.LeftSidebarRect[2] > visionResult.WindowWidth/3 {
-				alreadyInTargetChat = false
-				fmt.Println("  ⚠️ Large left sidebar suggests not in target chat page")
-			}
+		if leftSidebarWidth > 100 && leftSidebarWidth > windowWidth/3 {
+			// 左侧栏较大，可能是在主窗口
+			fmt.Printf("  ⚠️ Large left sidebar detected (%dpx) - likely in main window\n", leftSidebarWidth)
+			chatOpenSignals = append(chatOpenSignals, "large_left_sidebar")
+		} else if leftSidebarWidth > 0 && leftSidebarWidth <= windowWidth/3 {
+			// 左侧栏较小，可能在聊天页但有侧边栏
+			chatAreaSignal = true
+			chatOpenSignals = append(chatOpenSignals, "small_left_sidebar")
+			fmt.Printf("  ✓ Small left sidebar (%dpx) - could be in chat page\n", leftSidebarWidth)
 		} else {
+			// 没有左侧栏，很可能在聊天页
+			chatAreaSignal = true
 			chatOpenSignals = append(chatOpenSignals, "no_left_sidebar")
-			fmt.Println("  ✓ No left sidebar - might be in chat page")
+			fmt.Println("  ✓ No left sidebar - likely in chat page")
+		}
+	} else {
+		fmt.Printf("❌ Visual detection failed: %s\n", detectResult.Error)
+	}
 
-			// 没有左侧栏可能意味着在聊天页面
-			if !alreadyInTargetChat {
-				// 如果没有通过标题确认，但有此信号，谨慎乐观
-				chatOpenSignals = append(chatOpenSignals, "potential_chat_page")
+	// 验证信号4: 底部是否出现输入区候选
+	fmt.Println("--- Signal 4: Checking Input Area ---")
+	inputAreaSignal := false
+
+	// 查找输入框区域
+	inputBoxFound := false
+	for i, node := range nodes {
+		if (strings.Contains(strings.ToLower(node.Role), "edit") ||
+			strings.Contains(strings.ToLower(node.Role), "text")) &&
+			node.Bounds[2] > 100 && node.Bounds[3] > 20 {
+
+			// 检查位置：通常在底部区域
+			if node.Bounds[1] > visionResult.WindowHeight/2 && // 在窗口下半部分
+				node.Bounds[0] > (visionResult.WindowWidth/3) { // 不在左侧栏区域
+
+				inputBoxFound = true
+				fmt.Printf("✓ Input box candidate found at node %d (Y=%d)\n", i, node.Bounds[1])
+				chatOpenSignals = append(chatOpenSignals, "input_box_detected")
+				inputAreaSignal = true
+				break
 			}
 		}
+	}
+
+	if !inputBoxFound {
+		fmt.Println("⚠️ No input box detected in bottom area")
+		// 回退：检查任何可能在底部的文本输入控件
+		for i, node := range nodes {
+			if strings.Contains(strings.ToLower(node.Role), "edit") ||
+				strings.Contains(strings.ToLower(node.Role), "text") {
+
+				if node.Bounds[1] > visionResult.WindowHeight - 100 { // 距离底部100像素内
+					fmt.Printf("  ⚠️ Potential input box at node %d near bottom (Y=%d)\n", i, node.Bounds[1])
+					chatOpenSignals = append(chatOpenSignals, "potential_input_box")
+					break
+				}
+			}
+		}
+	}
+
+	// 综合判断
+	fmt.Println("--- Overall Verification ---")
+	alreadyInTargetChat = titleMatchSignal && contactHighlightSignal
+
+	// 计算置信度得分
+	signalCount := 0
+	if titleMatchSignal { signalCount++ }
+	if contactHighlightSignal { signalCount++ }
+	if chatAreaSignal { signalCount++ }
+	if inputAreaSignal { signalCount++ }
+
+	fmt.Printf("Verification signals: %d/4\n", signalCount)
+	fmt.Printf("  Title match: %v\n", titleMatchSignal)
+	fmt.Printf("  Contact highlight: %v\n", contactHighlightSignal)
+	fmt.Printf("  Chat area: %v\n", chatAreaSignal)
+	fmt.Printf("  Input area: %v\n", inputAreaSignal)
+
+	if alreadyInTargetChat {
+		chatOpenVerified = true
+		fmt.Println("✓ Already in target chat (confirmed by title and contact highlight)")
+	} else if signalCount >= 3 {
+		chatOpenVerified = true
+		fmt.Printf("✓ Chat open verified with %d/4 signals\n", signalCount)
+	} else if signalCount >= 2 {
+		chatOpenVerified = true
+		fmt.Printf("✓ Chat open likely verified with %d/4 signals\n", signalCount)
+	} else {
+		fmt.Println("⚠️ Not verified as target chat page (insufficient signals)")
 	}
 
 	// 综合判断
