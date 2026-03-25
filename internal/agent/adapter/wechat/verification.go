@@ -534,7 +534,14 @@ func (mc *MessageClassifier) FilterMessageAreaNodes(
 			continue
 		}
 
-		// Only include text/static nodes with reasonable content
+		// Include message candidate nodes (message bubbles, normal text)
+		// even if they don't have a Name field
+		if mc.IsMessageCandidate(node) {
+			result = append(result, node)
+			continue
+		}
+
+		// Also include text/static nodes with reasonable content
 		if node.Name != "" && len(node.Name) > 0 {
 			result = append(result, node)
 		}

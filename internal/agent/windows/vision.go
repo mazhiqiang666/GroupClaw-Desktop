@@ -2239,6 +2239,9 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 		activationSignals = append(activationSignals, signal)
 		strongSignals = append(strongSignals, signal)
 		activationScore += visualDiff * 100 // 视觉变化权重较高
+	} else {
+		// 记录视觉变化为0的原因（调试用）
+		activationSignals = append(activationSignals, fmt.Sprintf("visual_change:0.000"))
 	}
 
 	// 信号2: 候选区域亮度变化（输入框激活后通常变亮）(弱信号)
@@ -2256,6 +2259,9 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 		activationSignals = append(activationSignals, signal)
 		weakSignals = append(weakSignals, signal)
 		activationScore += float64(brightnessDiff) * 0.5
+	} else {
+		// 记录亮度变化为0或负的原因（调试用）
+		activationSignals = append(activationSignals, fmt.Sprintf("brightness_change:%d", brightnessDiff))
 	}
 
 	// 信号3: 候选区域边缘密度变化（输入框激活后边框可能更明显）(弱信号)
@@ -2273,6 +2279,9 @@ func (b *Bridge) ProbeInputBoxCandidate(windowHandle uintptr, candidate InputBox
 		activationSignals = append(activationSignals, signal)
 		weakSignals = append(weakSignals, signal)
 		activationScore += float64(edgeDiff) * 0.3
+	} else {
+		// 记录边缘密度变化为0或负的原因（调试用）
+		activationSignals = append(activationSignals, fmt.Sprintf("edge_change:%d", edgeDiff))
 	}
 
 	// 信号4: 候选区域位置稳定性（激活后位置应该稳定）(弱信号)

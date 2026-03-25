@@ -939,36 +939,45 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	// 阶段B: 文本注入
 	stageB := a.stageBTextInjection(conv, content, stageA)
 	if stageB.Failed {
+		// 合并 Stage A 和 Stage B 的诊断信息
+		allDiagnostics := append(stageA.Diagnostics, stageB.Diagnostics...)
 		return adapter.Result{
 			Status:      adapter.StatusFailed,
 			ReasonCode:  stageB.ReasonCode,
 			Error:       "Stage B failed: text injection",
 			ElapsedMs:   time.Since(startTime).Milliseconds(),
-			Diagnostics: stageB.Diagnostics,
+			Diagnostics: allDiagnostics,
 		}
 	}
 
 	// 阶段C: 发送动作
 	stageC := a.stageCSendAction(conv)
 	if stageC.Failed {
+		// 合并 Stage A, B, C 的诊断信息
+		allDiagnostics := append(stageA.Diagnostics, stageB.Diagnostics...)
+		allDiagnostics = append(allDiagnostics, stageC.Diagnostics...)
 		return adapter.Result{
 			Status:      adapter.StatusFailed,
 			ReasonCode:  stageC.ReasonCode,
 			Error:       "Stage C failed: send action",
 			ElapsedMs:   time.Since(startTime).Milliseconds(),
-			Diagnostics: stageC.Diagnostics,
+			Diagnostics: allDiagnostics,
 		}
 	}
 
 	// 阶段D: 发送结果验证
 	stageD := a.stageDSendVerification(conv, content, stageA, stageB)
 	if stageD.Failed {
+		// 合并 Stage A, B, C, D 的诊断信息
+		allDiagnostics := append(stageA.Diagnostics, stageB.Diagnostics...)
+		allDiagnostics = append(allDiagnostics, stageC.Diagnostics...)
+		allDiagnostics = append(allDiagnostics, stageD.Diagnostics...)
 		return adapter.Result{
 			Status:      adapter.StatusFailed,
 			ReasonCode:  stageD.ReasonCode,
 			Error:       "Stage D failed: send verification",
 			ElapsedMs:   time.Since(startTime).Milliseconds(),
-			Diagnostics: stageD.Diagnostics,
+			Diagnostics: allDiagnostics,
 		}
 	}
 
@@ -1069,6 +1078,21 @@ func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef,
 	const weakActivationThreshold = 10.0
 	const minStrongSignals = 1
 
+	// 聚焦窗口以确保点击和探测正常工作
+	focusResult := a.bridge.FocusWindow(conv.HostWindowHandle)
+	if focusResult.Status != adapter.StatusSuccess {
+		// 记录聚焦失败但继续尝试探测
+		result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "warning",
+			Message:   "Failed to focus window before probing",
+			Context: map[string]string{
+				"stage": "A",
+				"error": focusResult.Error,
+			},
+		})
+	}
+
 	// 对每个候选进行probe验证
 	var confirmedCandidates []windows.InputBoxCandidate
 	var probableCandidates []windows.InputBoxCandidate
@@ -1084,7 +1108,20 @@ func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef,
 		// 记录原始候选信息
 		allCandidates = append(allCandidates, candidate)
 
-		if probeErr.Status == adapter.StatusSuccess {
+		// 记录probe结果
+		if probeErr.Status != adapter.StatusSuccess {
+			result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+				Timestamp: time.Now(),
+				Level:     "error",
+				Message:   fmt.Sprintf("Candidate %d probe failed", i),
+				Context: map[string]string{
+					"stage":           "A",
+					"candidate_index": strconv.Itoa(i),
+					"error":           probeErr.Error,
+					"reason_code":     string(probeErr.ReasonCode),
+				},
+			})
+		} else {
 			candidate.ActivationScore = probeResult.ActivationScore
 			candidate.ActivationSignals = probeResult.ActivationSignals
 
@@ -1328,34 +1365,53 @@ func (a *WeChatAdapter) stageBTextInjection(conv protocol.ConversationRef, conte
 				result.StrongSignals = append(result.StrongSignals, strongSignal)
 			}
 
+			// 记录成功尝试到链路
+			attemptChain = append(attemptChain, attemptInfo)
 			break // 成功，退出循环
 		} else {
 			attemptInfo["result"] = "no_input_change"
 			attemptInfo["area_diff"] = fmt.Sprintf("%.3f", diff)
+			attemptChain = append(attemptChain, attemptInfo)
 		}
-
-		attemptChain = append(attemptChain, attemptInfo)
 	}
 
 	// 记录尝试链路
 	result.AttemptChain = attemptChain
 	result.TextInjectionSuccess = textInjectionSuccess
 
+	// Add attempt chain to diagnostics for bridge-dump display
+	for _, attempt := range attemptChain {
+		diag := adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "info",
+			Message:   fmt.Sprintf("Attempt %s: %s", attempt["attempt_index"], attempt["result"]),
+			Context: map[string]string{
+				"stage":           "B",
+				"attempt_index":   attempt["attempt_index"],
+				"candidate_rect":  attempt["candidate_rect"],
+				"area_diff":       attempt["area_diff"],
+				"result":          attempt["result"],
+				"error":           attempt["error"],
+				"strong_signals_count": "0", // Attempt-level signals not tracked
+				"weak_signals_count":   "0",
+			},
+		}
+		result.Diagnostics = append(result.Diagnostics, diag)
+	}
+
 	if !textInjectionSuccess {
 		result.Failed = true
 		result.ReasonCode = adapter.ReasonTextInjectionFailed
-		result.Diagnostics = []adapter.Diagnostic{
-			{
-				Timestamp: time.Now(),
-				Level:     "error",
-				Message:   "Text injection failed: no candidate worked",
-				Context: map[string]string{
-					"stage":          "B",
-					"attempt_count":  strconv.Itoa(len(attemptChain)),
-					"confidence_lvl": stageA.ConfidenceLevel,
-				},
+		result.Diagnostics = append(result.Diagnostics, adapter.Diagnostic{
+			Timestamp: time.Now(),
+			Level:     "error",
+			Message:   "Text injection failed: no candidate worked",
+			Context: map[string]string{
+				"stage":          "B",
+				"attempt_count":  strconv.Itoa(len(attemptChain)),
+				"confidence_lvl": stageA.ConfidenceLevel,
 			},
-		}
+		})
 		return result
 	}
 
@@ -1453,6 +1509,10 @@ func (a *WeChatAdapter) stageDSendVerification(conv protocol.ConversationRef, co
 	chatAreaBounds := [4]int{}
 	if len(messageNodesAfter) > 0 {
 		chatAreaBounds = messageNodesAfter[0].Bounds
+	} else {
+		// Fallback: use full window bounds if no message nodes found
+		// This allows screenshot comparison to detect changes
+		chatAreaBounds = [4]int{0, 0, stageA.WindowWidth, stageA.WindowHeight}
 	}
 
 	// 使用规则模块验证消息发送
@@ -1475,13 +1535,14 @@ func (a *WeChatAdapter) stageDSendVerification(conv protocol.ConversationRef, co
 		messageEvidence,
 	)
 
-	result.ChatAreaChanged = messageEvidence.NewMessageNodes > 0
+	// Chat area changed: based on new message nodes OR screenshot change
+	result.ChatAreaChanged = messageEvidence.NewMessageNodes > 0 || messageEvidence.ScreenshotChanged
 	result.InputClearedAfterSend = true // 假设输入框已清空
 
 	// 添加弱信号和强信号检测
 	// 弱信号：聊天区域变化
 	if result.ChatAreaChanged {
-		weakSignal := fmt.Sprintf("chat_area_changed:%d_nodes", messageEvidence.NewMessageNodes)
+		weakSignal := fmt.Sprintf("chat_area_changed:%d_nodes_diff:%.3f", messageEvidence.NewMessageNodes, messageEvidence.ChatAreaDiff)
 		result.WeakSignals = append(result.WeakSignals, weakSignal)
 	}
 
@@ -1494,6 +1555,12 @@ func (a *WeChatAdapter) stageDSendVerification(conv protocol.ConversationRef, co
 	// 强信号：新消息节点检测（消息落地证据）
 	if messageEvidence.NewMessageNodes > 0 {
 		strongSignal := fmt.Sprintf("new_message_detected:%d_nodes", messageEvidence.NewMessageNodes)
+		result.StrongSignals = append(result.StrongSignals, strongSignal)
+	}
+
+	// 强信号：截图变化检测（消息发送证据）
+	if messageEvidence.ScreenshotChanged && messageEvidence.ChatAreaDiff > 0.01 {
+		strongSignal := fmt.Sprintf("screenshot_changed_diff:%.3f", messageEvidence.ChatAreaDiff)
 		result.StrongSignals = append(result.StrongSignals, strongSignal)
 	}
 

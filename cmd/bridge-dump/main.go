@@ -15,7 +15,9 @@ import (
 	"time"
 
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter/wechat"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/windows"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 var (
@@ -2368,13 +2370,62 @@ func sendTest(bridge windows.BridgeInterface, handle uintptr, text string) {
 	fmt.Printf("Text: %s\n", text)
 	fmt.Println()
 
-	// 阶段A: 输入框定位
-	fmt.Println("=== Stage A: Input Box Positioning ===")
-	stageAResult := stageAInputBoxPositioning(bridge, handle)
-	if stageAResult.failed {
-		fmt.Printf("❌ Stage A FAILED: %s\n", stageAResult.reasonCode)
-		return
+	// 创建 WeChat adapter
+	wechatAdapter := wechat.NewWeChatAdapterWithBridge(bridge)
+
+	// 创建 ConversationRef
+	conv := protocol.ConversationRef{
+		HostWindowHandle: handle,
 	}
+
+	// 调用 adapter 的 Send 函数
+	result := wechatAdapter.Send(conv, text, "send-test")
+
+	// 打印 Stage A 信息
+	fmt.Println("=== Stage A: Input Box Positioning ===")
+
+	// 从 diagnostics 中提取 Stage A 信息
+	var stageAConfidence string
+	var stageASelectionReason string
+	var stageACandidateCount int
+	var stageABestCandidateIndex int
+
+	// 打印所有 diagnostics for debugging
+	fmt.Printf("  Total diagnostics: %d\n", len(result.Diagnostics))
+	for i, diag := range result.Diagnostics {
+		fmt.Printf("    Diag %d: [%s] %s (stage=%s)\n", i, diag.Level, diag.Message, diag.Context["stage"])
+	}
+
+	// 打印所有 Stage A diagnostics
+	fmt.Println("  Stage A Diagnostics:")
+	for _, diag := range result.Diagnostics {
+		if diag.Context["stage"] == "A" {
+			fmt.Printf("    [%s] %s\n", diag.Level, diag.Message)
+			for k, v := range diag.Context {
+				if k != "stage" {
+					fmt.Printf("      %s: %s\n", k, v)
+				}
+			}
+			if diag.Context["confidence_level"] != "" {
+				stageAConfidence = diag.Context["confidence_level"]
+				stageASelectionReason = diag.Context["selection_reason"]
+				stageACandidateCount, _ = strconv.Atoi(diag.Context["candidate_count"])
+				stageABestCandidateIndex, _ = strconv.Atoi(diag.Context["best_candidate_idx"])
+			}
+		}
+	}
+	fmt.Println()
+
+	fmt.Printf("  Candidates count: %d\n", stageACandidateCount)
+	fmt.Printf("  Best candidate index: %d\n", stageABestCandidateIndex)
+	fmt.Printf("  Confidence level: %s\n", stageAConfidence)
+	fmt.Printf("  Selection reason: %s\n", stageASelectionReason)
+	fmt.Println()
+
+	fmt.Printf("  Candidates count: %d\n", stageACandidateCount)
+	fmt.Printf("  Best candidate index: %d\n", stageABestCandidateIndex)
+	fmt.Printf("  Confidence level: %s\n", stageAConfidence)
+	fmt.Printf("  Selection reason: %s\n", stageASelectionReason)
 	fmt.Println()
 
 	// 保存阶段A截图（候选框）
@@ -2387,50 +2438,135 @@ func sendTest(bridge windows.BridgeInterface, handle uintptr, text string) {
 	}
 	fmt.Println()
 
-	// 阶段B: 文本注入
+	// 打印 Stage B 信息
 	fmt.Println("=== Stage B: Text Injection ===")
-	stageBResult := stageBTextInjection(bridge, handle, text, stageAResult.inputBoxRect, stageAResult.visionResult)
-	if stageBResult.failed {
-		fmt.Printf("❌ Stage B FAILED: %s\n", stageBResult.reasonCode)
-		return
+
+	// 从 diagnostics 中提取 Stage B 信息
+	var stageBAttemptCount int
+	var stageBFinalCandidate int
+	var stageBFinalConfirmedBy string
+
+	for _, diag := range result.Diagnostics {
+		if diag.Context["stage"] == "B" {
+			if diag.Context["attempt_count"] != "" {
+				stageBAttemptCount, _ = strconv.Atoi(diag.Context["attempt_count"])
+			}
+			if diag.Context["selected_candidate_index"] != "" {
+				stageBFinalCandidate, _ = strconv.Atoi(diag.Context["selected_candidate_index"])
+				stageBFinalConfirmedBy = "stage_b"
+			}
+		}
+	}
+
+	fmt.Printf("  Candidates tried count: %d\n", stageBAttemptCount)
+	fmt.Printf("  Final input box candidate: %d\n", stageBFinalCandidate)
+	fmt.Printf("  Final input box confirmed by: %s\n", stageBFinalConfirmedBy)
+	fmt.Println()
+
+	// 打印 AttemptChain 表
+	fmt.Println("=== Attempt Chain ===")
+	fmt.Println("Index | Rect                    | Diff%  | Strong | Weak | Result      | Error")
+	fmt.Println("------+-------------------------+--------+--------+------+-------------+------")
+
+	for _, diag := range result.Diagnostics {
+		if diag.Context["stage"] == "B" && diag.Context["attempt_index"] != "" {
+			attemptIdx := diag.Context["attempt_index"]
+			candidateRect := diag.Context["candidate_rect"]
+			areaDiff := diag.Context["area_diff"]
+			if areaDiff == "" {
+				areaDiff = "N/A"
+			}
+			strongCount := diag.Context["strong_signals_count"]
+			if strongCount == "" {
+				strongCount = "0"
+			}
+			weakCount := diag.Context["weak_signals_count"]
+			if weakCount == "" {
+				weakCount = "0"
+			}
+			resultStatus := diag.Context["result"]
+			errorMsg := diag.Context["error"]
+			if errorMsg == "" {
+				errorMsg = "-"
+			}
+
+			fmt.Printf("  %-5s | %-23s | %-6s | %-6s | %-4s | %-11s | %s\n",
+				attemptIdx, candidateRect, areaDiff, strongCount, weakCount, resultStatus, errorMsg)
+		}
 	}
 	fmt.Println()
 
-	// 保存阶段B截图（注入前和注入后）
-	if stageBResult.beforeScreenshot != nil {
-		savePath, err := saveImage(stageBResult.beforeScreenshot, "send_stage_b_before_input.png")
-		if err == nil {
-			fmt.Printf("  📷 Stage B before input screenshot saved: %s\n", savePath)
-		}
-	}
-	afterInjection, _ := bridge.CaptureWindow(handle)
-	if afterInjection != nil {
-		savePath, err := saveImage(afterInjection, "send_stage_b_after_input.png")
-		if err == nil {
-			fmt.Printf("  📷 Stage B after input screenshot saved: %s\n", savePath)
+	// 保存阶段B截图
+	if result.Diagnostics != nil {
+		// Find the before/after screenshots from diagnostics
+		for _, diag := range result.Diagnostics {
+			if diag.Context["stage"] == "B" && diag.Context["input_area_changed"] == "true" {
+				afterInjection, _ := bridge.CaptureWindow(handle)
+				if afterInjection != nil {
+					savePath, err := saveImage(afterInjection, "send_stage_b_after_input.png")
+					if err == nil {
+						fmt.Printf("  📷 Stage B after input screenshot saved: %s\n", savePath)
+					}
+				}
+				break
+			}
 		}
 	}
 	fmt.Println()
 
-	// 阶段C: 发送动作
+	// 打印 Stage C 信息
 	fmt.Println("=== Stage C: Send Action ===")
-	stageCResult := stageCSendAction(bridge, handle)
-	if stageCResult.failed {
-		fmt.Printf("❌ Stage C FAILED: %s\n", stageCResult.reasonCode)
-		return
+
+	var stageCSendMethod string
+	var stageCSendTriggered bool
+
+	for _, diag := range result.Diagnostics {
+		if diag.Context["stage"] == "C" {
+			if diag.Context["send_action_method"] != "" {
+				stageCSendMethod = diag.Context["send_action_method"]
+			}
+			if diag.Context["send_action_triggered"] != "" {
+				stageCSendTriggered = diag.Context["send_action_triggered"] == "true"
+			}
+		}
 	}
+
+	fmt.Printf("  Send action method: %s\n", stageCSendMethod)
+	fmt.Printf("  Send action triggered: %v\n", stageCSendTriggered)
 	fmt.Println()
 
-	// 阶段D: 发送结果验证
+	// 打印 Stage D 信息
 	fmt.Println("=== Stage D: Send Result Verification ===")
-	stageDResult := stageDSendVerification(bridge, handle, text, stageBResult.beforeScreenshot)
-	if stageDResult.failed {
-		fmt.Printf("❌ Stage D FAILED: %s\n", stageDResult.reasonCode)
-		return
+
+	var stageDChatAreaChanged bool
+	var stageDInputCleared bool
+	var stageDSendVerified bool
+	var stageDReasonCode string
+
+	for _, diag := range result.Diagnostics {
+		if diag.Context["stage"] == "D" {
+			if diag.Context["chat_area_changed"] != "" {
+				stageDChatAreaChanged = diag.Context["chat_area_changed"] == "true"
+			}
+			if diag.Context["input_cleared_after_send"] != "" {
+				stageDInputCleared = diag.Context["input_cleared_after_send"] == "true"
+			}
+			if diag.Context["send_verified"] != "" {
+				stageDSendVerified = diag.Context["send_verified"] == "true"
+			}
+			if diag.Context["reason_code"] != "" {
+				stageDReasonCode = diag.Context["reason_code"]
+			}
+		}
 	}
+
+	fmt.Printf("  Chat area changed: %v\n", stageDChatAreaChanged)
+	fmt.Printf("  Input cleared after send: %v\n", stageDInputCleared)
+	fmt.Printf("  Send verified: %v\n", stageDSendVerified)
+	fmt.Printf("  Reason code: %s\n", stageDReasonCode)
 	fmt.Println()
 
-	// 保存阶段D截图（发送后）
+	// 保存阶段D截图
 	afterSend, _ := bridge.CaptureWindow(handle)
 	if afterSend != nil {
 		savePath, err := saveImage(afterSend, "send_stage_d_after_send.png")
@@ -2441,8 +2577,12 @@ func sendTest(bridge windows.BridgeInterface, handle uintptr, text string) {
 
 	// 最终结果
 	fmt.Println("=== Final Result ===")
-	fmt.Printf("✓ Send VERIFIED\n")
-	fmt.Printf("Final Reason Code: %s\n", stageDResult.reasonCode)
+	if result.Status == adapter.StatusSuccess {
+		fmt.Printf("✓ Send VERIFIED\n")
+	} else {
+		fmt.Printf("❌ Send FAILED: %s\n", result.ReasonCode)
+	}
+	fmt.Printf("Final Reason Code: %s\n", result.ReasonCode)
 	fmt.Println()
 	fmt.Println("=== Send Test Complete ===")
 }
@@ -2748,15 +2888,16 @@ func saveImage(imgData []byte, filename string) (string, error) {
 // decodeBGRToRGBA 将BGR数据解码为RGBA图像
 func decodeBGRToRGBA(data []byte) (*image.RGBA, error) {
 	if len(data) < 54 {
-		return nil, fmt.Errorf("invalid BMP data")
+		return nil, fmt.Errorf("invalid BMP data: too short (%d bytes)", len(data))
 	}
 
 	// 简化的BMP解析 - 假设是32位BGR格式
 	width := int(data[18]) | int(data[19])<<8 | int(data[20])<<16 | int(data[21])<<24
 	height := int(data[22]) | int(data[23])<<8 | int(data[24])<<16 | int(data[25])<<24
 
-	if width <= 0 || height <= 0 {
-		return nil, fmt.Errorf("invalid dimensions")
+	// 验证维度合理性（防止溢出）
+	if width <= 0 || height <= 0 || width > 10000 || height > 10000 {
+		return nil, fmt.Errorf("invalid dimensions: width=%d, height=%d", width, height)
 	}
 
 	img := image.NewRGBA(image.Rect(0, 0, width, height))
