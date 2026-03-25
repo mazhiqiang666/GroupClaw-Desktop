@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"flag"
 	"log"
 	"os"
 	"os/signal"
@@ -12,10 +13,20 @@ import (
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter/wechat"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/comm"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/idempotency"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/monitor"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/remote"
+	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/session"
 	"github.com/mazhiqiang666/GroupClaw-Desktop/pkg/protocol"
 )
 
 func main() {
+	// 解析命令行参数
+	enableMonitor := flag.Bool("monitor", false, "启用监控模式")
+	pollInterval := flag.Duration("poll-interval", 5*time.Second, "监控轮询间隔")
+	agentEndpoint := flag.String("agent-endpoint", "http://localhost:8080/api/reply", "远端agent端点")
+	useMockAgent := flag.Bool("mock-agent", false, "使用模拟agent（测试用）")
+	flag.Parse()
+
 	// 初始化日志
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
@@ -48,7 +59,44 @@ func main() {
 	}
 	log.Println("适配器初始化成功")
 
-	// 初始化幂等存储
+	// 初始化会话管理器
+	sessionMgr := session.NewSessionManager(nil)
+	log.Println("会话管理器初始化成功")
+
+	// 初始化远端agent客户端
+	var agentClient monitor.RemoteAgentClient
+	if *useMockAgent {
+		agentClient = remote.NewMockClient(*agentEndpoint)
+		log.Printf("使用模拟agent客户端: %s", *agentEndpoint)
+	} else {
+		agentClient = remote.NewGatewayClient(*agentEndpoint, 30*time.Second)
+		log.Printf("使用网关agent客户端: %s", *agentEndpoint)
+	}
+
+	// 如果启用监控模式，启动监控服务
+	if *enableMonitor {
+		monitorConfig := monitor.Config{
+			PollInterval:     *pollInterval,
+			MaxRetries:       3,
+			OperationTimeout: 10 * time.Second,
+			AgentEndpoint:    *agentEndpoint,
+		}
+
+		monitorSvc := monitor.NewMonitorService(
+			wechatAdapter,
+			sessionMgr,
+			agentClient,
+			monitorConfig,
+		)
+
+		if err := monitorSvc.Start(); err != nil {
+			log.Fatalf("启动监控服务失败: %v", err)
+		}
+
+		log.Printf("监控服务已启动 (轮询间隔: %v)", *pollInterval)
+	}
+
+	// 初始化幂等存储（用于命令处理）
 	idempStore := idempotency.NewMemoryStore()
 	log.Println("幂等存储初始化成功")
 
@@ -63,7 +111,7 @@ func main() {
 
 	// 注册命令处理器
 	client.RegisterHandler(protocol.PayloadReplyExecute, func(env *protocol.Envelope) {
-		handleReplyExecute(ctx, env, wechatAdapter, idempStore, identityResolver, client)
+		handleReplyExecute(ctx, env, wechatAdapter, idempStore, identityResolver, client, sessionMgr)
 	})
 
 	client.RegisterHandler(protocol.PayloadConvModeSet, func(env *protocol.Envelope) {
@@ -102,7 +150,7 @@ func main() {
 	log.Println("Agent 已退出")
 }
 
-// handleReplyExecute 处理 reply.execute 命令
+// handleReplyExecute 处理 reply.execute 命令（增强版，支持会话管理）
 func handleReplyExecute(
 	ctx context.Context,
 	env *protocol.Envelope,
@@ -110,6 +158,7 @@ func handleReplyExecute(
 	idempStore *idempotency.MemoryStore,
 	resolver protocol.ConversationIdentityResolver,
 	client *comm.WebSocketClient,
+	sessionMgr *session.SessionManager,
 ) {
 	log.Printf("收到 reply.execute 命令: task_id=%s", env.TaskID)
 
@@ -165,6 +214,13 @@ func handleReplyExecute(
 	}
 	log.Printf("目标会话: %s", targetConv.DisplayName)
 
+	// 更新会话管理器的会话引用
+	if sessionMgr != nil {
+		if err := sessionMgr.SetConversationRef(convID, targetConv); err != nil {
+			log.Printf("更新会话引用失败: %v", err)
+		}
+	}
+
 	// 阶段4: 聚焦到会话
 	sendProgress(client, env.TaskID, 0.7, "切换到目标会话...", "focusing")
 	focusResult := chatAdapter.Focus(*targetConv)
@@ -201,6 +257,20 @@ func handleReplyExecute(
 	} else {
 		deliveryState = "unknown"
 		log.Printf("验证消息失败: %s", verifyResult.Error)
+	}
+
+	// 更新会话管理器中的回复记录
+	if sessionMgr != nil {
+		success := sendResult.Status == adapter.StatusSuccess
+		confidence := verifyResult.Confidence
+		var errorMsg string
+		if !success {
+			errorMsg = sendResult.Error
+		}
+
+		if _, err := sessionMgr.AddReply(convID, payload.ReplyContent, env.TaskID, success, errorMsg, confidence); err != nil {
+			log.Printf("添加回复记录到会话管理器失败: %v", err)
+		}
 	}
 
 	// 标记任务已处理

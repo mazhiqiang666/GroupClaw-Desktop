@@ -994,6 +994,226 @@ func (a *WeChatAdapter) Send(conv protocol.ConversationRef, content string, task
 	}
 }
 
+// InjectSearchText 搜索框文本注入（优先使用 type_chars / clear_then_type_chars）
+func (a *WeChatAdapter) InjectSearchText(windowHandle uintptr, text string, strategy string) adapter.Result {
+	startTime := time.Now()
+
+	// 默认策略
+	if strategy == "" {
+		strategy = "type_chars"
+	}
+
+	// 设置剪贴板文本（用于粘贴策略）
+	setResult := a.bridge.SetClipboardText(text)
+	if setResult.Status != adapter.StatusSuccess {
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonTextInjectionFailed,
+			Error:      fmt.Sprintf("Failed to set clipboard: %s", setResult.Error),
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
+	}
+
+	var result adapter.Result
+	switch strategy {
+	case "ctrl_v":
+		// Ctrl+V 粘贴
+		result = a.bridge.SendKeys(windowHandle, "^v")
+	case "shift_insert":
+		// Shift+Insert 粘贴（实际上仍使用 Ctrl+V）
+		result = a.bridge.SendKeys(windowHandle, "^v")
+	case "type_chars":
+		// 直接输入字符
+		for _, char := range text {
+			charResult := a.bridge.SendKeys(windowHandle, string(char))
+			if charResult.Status != adapter.StatusSuccess {
+				return adapter.Result{
+					Status:     adapter.StatusFailed,
+					ReasonCode: adapter.ReasonTextInjectionFailed,
+					Error:      fmt.Sprintf("Failed to type character '%s': %s", string(char), charResult.Error),
+					ElapsedMs:  time.Since(startTime).Milliseconds(),
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		result = adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+		}
+	case "clear_then_type_chars":
+		// 先清除字段再输入
+		// 发送 Backspace 清除内容
+		for i := 0; i < 20; i++ { // 假设最多20个字符
+			backspaceResult := a.bridge.SendKeys(windowHandle, "{BACKSPACE}")
+			if backspaceResult.Status != adapter.StatusSuccess {
+				break
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+
+		// 然后输入文本
+		for _, char := range text {
+			charResult := a.bridge.SendKeys(windowHandle, string(char))
+			if charResult.Status != adapter.StatusSuccess {
+				return adapter.Result{
+					Status:     adapter.StatusFailed,
+					ReasonCode: adapter.ReasonTextInjectionFailed,
+					Error:      fmt.Sprintf("Failed to type character '%s' after clearing: %s", string(char), charResult.Error),
+					ElapsedMs:  time.Since(startTime).Milliseconds(),
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		result = adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+		}
+	default:
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonTextInjectionFailed,
+			Error:      fmt.Sprintf("Unknown strategy: %s", strategy),
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
+	}
+
+	if result.Status != adapter.StatusSuccess {
+		return adapter.Result{
+			Status:     result.Status,
+			ReasonCode: result.ReasonCode,
+			Error:      result.Error,
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: result.Diagnostics,
+		}
+	}
+
+	return adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+		ElapsedMs:  time.Since(startTime).Milliseconds(),
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Search text injected successfully",
+				Context: map[string]string{
+					"strategy": strategy,
+					"text_length": strconv.Itoa(len(text)),
+				},
+			},
+		},
+	}
+}
+
+// InjectReplyText 聊天回复文本注入（优先使用 Ctrl+V / Shift+Insert）
+func (a *WeChatAdapter) InjectReplyText(windowHandle uintptr, text string, strategy string) adapter.Result {
+	startTime := time.Now()
+
+	// 默认策略
+	if strategy == "" {
+		strategy = "ctrl_v"
+	}
+
+	// 设置剪贴板文本
+	setResult := a.bridge.SetClipboardText(text)
+	if setResult.Status != adapter.StatusSuccess {
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonTextInjectionFailed,
+			Error:      fmt.Sprintf("Failed to set clipboard: %s", setResult.Error),
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
+	}
+
+	var result adapter.Result
+	switch strategy {
+	case "ctrl_v":
+		// Ctrl+V 粘贴
+		result = a.bridge.SendKeys(windowHandle, "^v")
+	case "shift_insert":
+		// Shift+Insert 粘贴（实际上仍使用 Ctrl+V）
+		result = a.bridge.SendKeys(windowHandle, "^v")
+	case "type_chars":
+		// 直接输入字符（兜底策略）
+		for _, char := range text {
+			charResult := a.bridge.SendKeys(windowHandle, string(char))
+			if charResult.Status != adapter.StatusSuccess {
+				return adapter.Result{
+					Status:     adapter.StatusFailed,
+					ReasonCode: adapter.ReasonTextInjectionFailed,
+					Error:      fmt.Sprintf("Failed to type character '%s': %s", string(char), charResult.Error),
+					ElapsedMs:  time.Since(startTime).Milliseconds(),
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		result = adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+		}
+	case "clear_then_type_chars":
+		// 先清除字段再输入（兜底策略）
+		for i := 0; i < 20; i++ {
+			backspaceResult := a.bridge.SendKeys(windowHandle, "{BACKSPACE}")
+			if backspaceResult.Status != adapter.StatusSuccess {
+				break
+			}
+			time.Sleep(30 * time.Millisecond)
+		}
+
+		for _, char := range text {
+			charResult := a.bridge.SendKeys(windowHandle, string(char))
+			if charResult.Status != adapter.StatusSuccess {
+				return adapter.Result{
+					Status:     adapter.StatusFailed,
+					ReasonCode: adapter.ReasonTextInjectionFailed,
+					Error:      fmt.Sprintf("Failed to type character '%s' after clearing: %s", string(char), charResult.Error),
+					ElapsedMs:  time.Since(startTime).Milliseconds(),
+				}
+			}
+			time.Sleep(50 * time.Millisecond)
+		}
+		result = adapter.Result{
+			Status:     adapter.StatusSuccess,
+			ReasonCode: adapter.ReasonOK,
+		}
+	default:
+		return adapter.Result{
+			Status:     adapter.StatusFailed,
+			ReasonCode: adapter.ReasonTextInjectionFailed,
+			Error:      fmt.Sprintf("Unknown strategy: %s", strategy),
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+		}
+	}
+
+	if result.Status != adapter.StatusSuccess {
+		return adapter.Result{
+			Status:     result.Status,
+			ReasonCode: result.ReasonCode,
+			Error:      result.Error,
+			ElapsedMs:  time.Since(startTime).Milliseconds(),
+			Diagnostics: result.Diagnostics,
+		}
+	}
+
+	return adapter.Result{
+		Status:     adapter.StatusSuccess,
+		ReasonCode: adapter.ReasonOK,
+		ElapsedMs:  time.Since(startTime).Milliseconds(),
+		Diagnostics: []adapter.Diagnostic{
+			{
+				Timestamp: time.Now(),
+				Level:     "info",
+				Message:   "Reply text injected successfully",
+				Context: map[string]string{
+					"strategy": strategy,
+					"text_length": strconv.Itoa(len(text)),
+				},
+			},
+		},
+	}
+}
+
 // Stage A: 输入框定位
 func (a *WeChatAdapter) stageAInputBoxPositioning(conv protocol.ConversationRef, taskID string) StageAInputBoxPositioning {
 	result := StageAInputBoxPositioning{}
