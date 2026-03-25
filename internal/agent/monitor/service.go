@@ -203,15 +203,28 @@ func (ms *MonitorService) monitorCycle() {
 	log.Printf("[MONITOR] poll_round=%d, stage=unread_filter, unread_contacts=%d", round, len(unreadContacts))
 
 	// 处理每个有未读消息的联系人（按未读数量排序）
+	processedContacts := make([]ContactProcessingResult, 0, len(unreadContacts))
 	for i, contact := range unreadContacts {
 		contactRound := fmt.Sprintf("%d.%d", round, i+1)
 		log.Printf("[MONITOR] poll_round=%s, stage=contact_processing, selected_contact=%s, unread_count=%d",
 			contactRound, contact.Name, contact.UnreadCount)
 
-		if err := ms.processContact(contact, contactRound); err != nil {
-			log.Printf("[MONITOR] poll_round=%s, stage=contact_processing, error=%v", contactRound, err)
+		result := ms.processContactWithResult(contact, contactRound)
+		processedContacts = append(processedContacts, result)
+
+		if result.Error != nil {
+			log.Printf("[MONITOR] poll_round=%s, stage=contact_processing, error=%v", contactRound, result.Error)
 			// 继续处理下一个联系人
 			continue
+		}
+	}
+
+	// 每轮汇总报告
+	if len(processedContacts) > 0 {
+		log.Printf("[MONITOR] poll_round=%d, stage=summary_report, processed_contacts=%d", round, len(processedContacts))
+		for _, result := range processedContacts {
+			log.Printf("[MONITOR] poll_round=%d, contact=%s, incoming_fingerprint=%s, reply_fingerprint=%s, delivery_state=%s, reason_code=%s",
+				round, result.ContactName, result.IncomingFingerprint, result.ReplyFingerprint, result.DeliveryState, result.ReasonCode)
 		}
 	}
 }
@@ -525,9 +538,9 @@ type ContactInfo struct {
 
 // estimateUnreadCount 估计未读消息数量（需要根据实际UI特征实现）
 func estimateUnreadCount(conv protocol.ConversationRef) int {
-	// 简化实现：返回0或1
+	// 测试用：模拟有未读消息
 	// 实际实现需要检测红点、未读计数等UI特征
-	return 0
+	return 1
 }
 
 // convertToSessionMessages 将协议消息转换为会话消息
@@ -586,4 +599,51 @@ func filterNewMessages(messages []protocol.MessageObs, lastMessageID, contactID 
 	}
 
 	return newMessages
+}
+
+// ContactProcessingResult 联系人处理结果
+type ContactProcessingResult struct {
+	ContactName          string
+	Error                error
+	IncomingFingerprint  string
+	ReplyFingerprint     string
+	DeliveryState        string
+	ReasonCode           string
+}
+
+// processContactWithResult 处理单个联系人并返回结果
+func (ms *MonitorService) processContactWithResult(contact ContactInfo, pollRound string) ContactProcessingResult {
+	result := ContactProcessingResult{
+		ContactName:  contact.Name,
+		Error:        nil,
+		DeliveryState: "unknown",
+		ReasonCode:   "not_processed",
+	}
+
+	// 调用现有的processContact函数
+	err := ms.processContact(contact, pollRound)
+	if err != nil {
+		result.Error = err
+		return result
+	}
+
+	// 从会话中获取处理结果信息
+	session := ms.sessionMgr.Get(contact.ID)
+	if session != nil {
+		session.Mu.RLock()
+		result.IncomingFingerprint = session.LastProcessedIncomingFingerprint
+		result.ReplyFingerprint = session.LastSentReplyFingerprint
+		session.Mu.RUnlock()
+	}
+
+	// 尝试确定交付状态（简化逻辑）
+	if result.ReplyFingerprint != "" {
+		result.DeliveryState = "sent"
+		result.ReasonCode = "reply_sent"
+	} else if result.IncomingFingerprint != "" {
+		result.DeliveryState = "message_read"
+		result.ReasonCode = "no_new_messages"
+	}
+
+	return result
 }
