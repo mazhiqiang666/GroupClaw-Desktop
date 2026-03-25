@@ -25,6 +25,7 @@ func main() {
 	pollInterval := flag.Duration("poll-interval", 5*time.Second, "监控轮询间隔")
 	agentEndpoint := flag.String("agent-endpoint", "http://localhost:8080/api/reply", "远端agent端点")
 	useMockAgent := flag.Bool("mock-agent", false, "使用模拟agent（测试用）")
+	dryRun := flag.Bool("dry-run", false, "dry-run模式：不真正发送回复")
 	flag.Parse()
 
 	// 初始化日志
@@ -80,6 +81,7 @@ func main() {
 			MaxRetries:       3,
 			OperationTimeout: 10 * time.Second,
 			AgentEndpoint:    *agentEndpoint,
+			DryRun:          *dryRun,
 		}
 
 		monitorSvc := monitor.NewMonitorService(
@@ -93,9 +95,20 @@ func main() {
 			log.Fatalf("启动监控服务失败: %v", err)
 		}
 
-		log.Printf("监控服务已启动 (轮询间隔: %v)", *pollInterval)
+		log.Printf("监控服务已启动 (轮询间隔: %v, dry-run: %v)", *pollInterval, *dryRun)
+
+		// 监控模式下不需要WebSocket客户端和命令处理器
+		// 直接等待退出信号
+		log.Println("Agent 启动成功，监控模式运行中...")
+		<-ctx.Done()
+
+		// 停止监控服务
+		monitorSvc.Stop()
+		log.Println("Agent 已退出")
+		return
 	}
 
+	// 标准WebSocket Gateway worker模式
 	// 初始化幂等存储（用于命令处理）
 	idempStore := idempotency.NewMemoryStore()
 	log.Println("幂等存储初始化成功")
@@ -268,7 +281,9 @@ func handleReplyExecute(
 			errorMsg = sendResult.Error
 		}
 
-		if _, err := sessionMgr.AddReply(convID, payload.ReplyContent, env.TaskID, success, errorMsg, confidence); err != nil {
+		// 使用taskID作为回复指纹
+		replyFingerprint := env.TaskID
+		if _, err := sessionMgr.AddReply(convID, payload.ReplyContent, env.TaskID, success, errorMsg, confidence, replyFingerprint); err != nil {
 			log.Printf("添加回复记录到会话管理器失败: %v", err)
 		}
 	}

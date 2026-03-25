@@ -48,6 +48,9 @@ type ChatSession struct {
 	UnreadCount        int          `json:"unread_count"`
 	IsActive           bool         `json:"is_active"`
 	ConversationRef    *protocol.ConversationRef `json:"conversation_ref,omitempty"`
+	// 去重字段
+	LastProcessedIncomingFingerprint string `json:"last_processed_incoming_fingerprint"`
+	LastSentReplyFingerprint        string `json:"last_sent_reply_fingerprint"`
 }
 
 // SessionManager 会话管理器
@@ -119,6 +122,9 @@ func (sm *SessionManager) GetOrCreate(contactID, contactName string) *ChatSessio
 		UnreadCount:     0,
 		IsActive:        false,
 		ConversationRef: nil,
+		// 去重字段初始化
+		LastProcessedIncomingFingerprint: "",
+		LastSentReplyFingerprint:        "",
 	}
 
 	sm.sessions[contactID] = session
@@ -186,6 +192,8 @@ func (sm *SessionManager) AddMessage(contactID, sender, content, fingerprint str
 
 	if !isOutgoing {
 		session.UnreadCount++
+		// 更新最后处理的消息指纹
+		session.LastProcessedIncomingFingerprint = fingerprint
 	}
 
 	session.LastActivityAt = time.Now()
@@ -226,7 +234,7 @@ func (sm *SessionManager) MarkAsRead(contactID string, lastMessageID string) err
 }
 
 // AddReply 添加回复记录
-func (sm *SessionManager) AddReply(contactID, content, taskID string, success bool, errorMsg string, confidence float64) (*ReplyRecord, error) {
+func (sm *SessionManager) AddReply(contactID, content, taskID string, success bool, errorMsg string, confidence float64, replyFingerprint string) (*ReplyRecord, error) {
 	session := sm.Get(contactID)
 	if session == nil {
 		return nil, fmt.Errorf("session not found for %s", contactID)
@@ -250,6 +258,10 @@ func (sm *SessionManager) AddReply(contactID, content, taskID string, success bo
 	session.LastReplyContent = content
 	session.PendingReply = ""
 	session.LastActivityAt = time.Now()
+	// 更新最后发送的回复指纹
+	if success && replyFingerprint != "" {
+		session.LastSentReplyFingerprint = replyFingerprint
+	}
 
 	// 限制历史记录大小
 	if len(session.ReplyHistory) > 50 {

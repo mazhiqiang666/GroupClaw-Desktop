@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/mazhiqiang666/GroupClaw-Desktop/internal/agent/adapter"
@@ -26,6 +27,8 @@ type MonitorService struct {
 	isRunning     bool
 	maxRetries    int
 	operationTimeout time.Duration
+	dryRun        bool
+	pollRound     int64 // 监控轮次计数器
 }
 
 // RemoteAgentClient 远端agent客户端接口
@@ -50,6 +53,7 @@ type Config struct {
 	MaxRetries        int           `yaml:"max_retries"`
 	OperationTimeout  time.Duration `yaml:"operation_timeout"`
 	AgentEndpoint     string        `yaml:"agent_endpoint"`
+	DryRun           bool           `yaml:"dry_run"`
 }
 
 // DefaultConfig 默认配置
@@ -58,6 +62,7 @@ var DefaultConfig = Config{
 	MaxRetries:       3,
 	OperationTimeout: 10 * time.Second,
 	AgentEndpoint:    "http://localhost:8080/api/reply",
+	DryRun:           false,
 }
 
 // NewMonitorService 创建新的监控服务
@@ -79,6 +84,8 @@ func NewMonitorService(
 		isRunning:       false,
 		maxRetries:      config.MaxRetries,
 		operationTimeout: config.OperationTimeout,
+		dryRun:          config.DryRun,
+		pollRound:       0,
 	}
 }
 
@@ -168,36 +175,41 @@ func (ms *MonitorService) monitorLoop() {
 // monitorCycle 单次监控周期（实现8个步骤）
 func (ms *MonitorService) monitorCycle() {
 	startTime := time.Now()
-	log.Printf("开始监控周期 [%s]", startTime.Format("15:04:05"))
+	round := atomic.AddInt64(&ms.pollRound, 1)
+	log.Printf("[MONITOR] poll_round=%d, started", round)
 
 	defer func() {
 		if r := recover(); r != nil {
-			log.Printf("监控周期发生恐慌: %v", r)
+			log.Printf("[MONITOR] poll_round=%d, error=panic, reason=%v", round, r)
 		}
 		elapsed := time.Since(startTime)
-		log.Printf("监控周期完成 [耗时: %v]", elapsed)
+		log.Printf("[MONITOR] poll_round=%d, completed, elapsed=%v", round, elapsed)
 	}()
 
 	// 步骤1: 监测联系人列表
 	contacts, err := ms.monitorContactList()
 	if err != nil {
-		log.Printf("监测联系人列表失败: %v", err)
+		log.Printf("[MONITOR] poll_round=%d, stage=contact_detection, error=%v", round, err)
 		return
 	}
+	log.Printf("[MONITOR] poll_round=%d, stage=contact_detection, detected_contacts=%d", round, len(contacts))
 
 	// 查找有未读消息的联系人
 	unreadContacts := ms.filterUnreadContacts(contacts)
 	if len(unreadContacts) == 0 {
-		log.Println("没有未读消息的联系人")
+		log.Printf("[MONITOR] poll_round=%d, stage=unread_filter, reason=no_unread_contacts", round)
 		return
 	}
-
-	log.Printf("发现 %d 个有未读消息的联系人", len(unreadContacts))
+	log.Printf("[MONITOR] poll_round=%d, stage=unread_filter, unread_contacts=%d", round, len(unreadContacts))
 
 	// 处理每个有未读消息的联系人（按未读数量排序）
-	for _, contact := range unreadContacts {
-		if err := ms.processContact(contact); err != nil {
-			log.Printf("处理联系人 %s 失败: %v", contact.Name, err)
+	for i, contact := range unreadContacts {
+		contactRound := fmt.Sprintf("%d.%d", round, i+1)
+		log.Printf("[MONITOR] poll_round=%s, stage=contact_processing, selected_contact=%s, unread_count=%d",
+			contactRound, contact.Name, contact.UnreadCount)
+
+		if err := ms.processContact(contact, contactRound); err != nil {
+			log.Printf("[MONITOR] poll_round=%s, stage=contact_processing, error=%v", contactRound, err)
 			// 继续处理下一个联系人
 			continue
 		}
@@ -245,65 +257,79 @@ func (ms *MonitorService) filterUnreadContacts(contacts []ContactInfo) []Contact
 }
 
 // processContact 处理单个联系人（步骤2-8）
-func (ms *MonitorService) processContact(contact ContactInfo) error {
-	log.Printf("处理联系人: %s (未读: %d)", contact.Name, contact.UnreadCount)
+func (ms *MonitorService) processContact(contact ContactInfo, pollRound string) error {
+	log.Printf("[MONITOR] poll_round=%s, stage=contact_selected, selected_contact=%s, unread_count=%d",
+		pollRound, contact.Name, contact.UnreadCount)
 
 	// 步骤2: 打开有新消息的联系人
 	convRef, err := ms.openContact(contact)
 	if err != nil {
+		log.Printf("[MONITOR] poll_round=%s, stage=chat_open, reason=open_failed, error=%v", pollRound, err)
 		return fmt.Errorf("打开联系人失败: %v", err)
 	}
+	log.Printf("[MONITOR] poll_round=%s, stage=chat_open, chat_open_verified=true", pollRound)
 
 	// 更新会话引用
 	if err := ms.sessionMgr.SetConversationRef(contact.ID, &convRef); err != nil {
-		log.Printf("更新会话引用失败: %v", err)
+		log.Printf("[MONITOR] poll_round=%s, stage=session_update, reason=ref_update_failed, error=%v", pollRound, err)
 	}
 
 	// 步骤3: 读取新增消息
 	messages, err := ms.readNewMessages(convRef, contact.ID)
 	if err != nil {
+		log.Printf("[MONITOR] poll_round=%s, stage=message_read, reason=read_failed, error=%v", pollRound, err)
 		return fmt.Errorf("读取消息失败: %v", err)
 	}
 
 	if len(messages) == 0 {
-		log.Printf("没有新消息需要处理")
+		log.Printf("[MONITOR] poll_round=%s, stage=message_read, reason=no_new_messages", pollRound)
 		return nil
 	}
 
-	log.Printf("读取到 %d 条新消息", len(messages))
+	log.Printf("[MONITOR] poll_round=%s, stage=message_read, new_messages_count=%d", pollRound, len(messages))
 
 	// 步骤4: 更新该联系人的session
 	if err := ms.updateSessionWithMessages(contact.ID, messages); err != nil {
+		log.Printf("[MONITOR] poll_round=%s, stage=session_update, reason=message_update_failed, error=%v", pollRound, err)
 		return fmt.Errorf("更新会话失败: %v", err)
 	}
+	log.Printf("[MONITOR] poll_round=%s, stage=session_update, session_updated=true", pollRound)
 
 	// 步骤5: 调用远端agent获取回复
 	replyContent, err := ms.callRemoteAgent(contact.ID)
 	if err != nil {
+		log.Printf("[MONITOR] poll_round=%s, stage=agent_request, reason=agent_failed, error=%v", pollRound, err)
 		return fmt.Errorf("获取回复失败: %v", err)
 	}
 
 	if replyContent == "" {
-		log.Printf("远端agent返回空回复，跳过发送")
+		log.Printf("[MONITOR] poll_round=%s, stage=agent_request, reason=empty_reply", pollRound)
 		return nil
 	}
+	log.Printf("[MONITOR] poll_round=%s, stage=agent_request, agent_reply_received=true, reply_length=%d", pollRound, len(replyContent))
 
 	// 步骤6: 确认当前聊天框仍属于该联系人
 	if err := ms.verifyCurrentChat(convRef, contact.Name); err != nil {
+		log.Printf("[MONITOR] poll_round=%s, stage=chat_verify, reason=verification_failed, error=%v", pollRound, err)
 		return fmt.Errorf("验证聊天框失败: %v", err)
 	}
+	log.Printf("[MONITOR] poll_round=%s, stage=chat_verify, chat_open_verified=true", pollRound)
 
 	// 步骤7: 输入并发送回复
 	taskID := fmt.Sprintf("monitor_%d", time.Now().UnixNano())
 	sendResult, err := ms.sendReply(convRef, replyContent, taskID)
 	if err != nil {
+		log.Printf("[MONITOR] poll_round=%s, stage=reply_send, reason=send_failed, error=%v", pollRound, err)
 		return fmt.Errorf("发送回复失败: %v", err)
 	}
+	log.Printf("[MONITOR] poll_round=%s, stage=reply_send, reply_sent=true, confidence=%.2f", pollRound, sendResult.Confidence)
 
 	// 步骤8: 更新session
 	if err := ms.updateSessionAfterReply(contact.ID, replyContent, taskID, sendResult); err != nil {
+		log.Printf("[MONITOR] poll_round=%s, stage=session_update, reason=reply_record_failed, error=%v", pollRound, err)
 		return fmt.Errorf("更新回复记录失败: %v", err)
 	}
+	log.Printf("[MONITOR] poll_round=%s, stage=session_update, session_updated=true, final_state=success", pollRound)
 
 	log.Printf("成功处理联系人 %s 的回复", contact.Name)
 	return nil
@@ -313,17 +339,20 @@ func (ms *MonitorService) processContact(contact ContactInfo) error {
 func (ms *MonitorService) openContact(contact ContactInfo) (protocol.ConversationRef, error) {
 	log.Printf("步骤2: 打开联系人 %s", contact.Name)
 
-	// 尝试直接聚焦到会话
+	// 策略：列表优先，搜索兜底
+	// 当前实现：列表优先 - 尝试直接聚焦到扫描到的联系人
 	focusResult := ms.adapter.Focus(contact.Conversation)
 	if focusResult.Status == adapter.StatusSuccess && focusResult.Confidence >= 0.8 {
-		log.Printf("直接聚焦成功 (置信度: %.2f)", focusResult.Confidence)
+		log.Printf("列表优先策略成功 (置信度: %.2f)", focusResult.Confidence)
 		return contact.Conversation, nil
 	}
 
-	// 如果直接聚焦失败，尝试其他导航方式
-	// 这里可以调用 debug-contact-search 类似的逻辑
-	// 简化实现：返回错误
-	return protocol.ConversationRef{}, fmt.Errorf("无法打开联系人，需要实现完整导航逻辑")
+	// 搜索兜底策略（需要adapter支持搜索功能）
+	// TODO: 实现搜索框导航回退策略
+	// 当前简化实现：返回错误
+	log.Printf("列表优先策略失败，需要搜索兜底但adapter不支持 (置信度: %.2f, 错误: %s)",
+		focusResult.Confidence, focusResult.Error)
+	return protocol.ConversationRef{}, fmt.Errorf("无法打开联系人: %s (置信度: %.2f)", focusResult.Error, focusResult.Confidence)
 }
 
 // readNewMessages 读取新增消息（步骤3）
@@ -427,6 +456,17 @@ func (ms *MonitorService) verifyCurrentChat(convRef protocol.ConversationRef, co
 func (ms *MonitorService) sendReply(convRef protocol.ConversationRef, content, taskID string) (adapter.Result, error) {
 	log.Printf("步骤7: 发送回复")
 
+	// dry-run模式：不真正发送，模拟成功
+	if ms.dryRun {
+		log.Printf("[DRY-RUN] 模拟发送回复: content=%s (length=%d)", content, len(content))
+		// 返回模拟的成功结果
+		return adapter.Result{
+			Status:     adapter.StatusSuccess,
+			Confidence: 0.9,
+			ElapsedMs:  100,
+		}, nil
+	}
+
 	// 使用适配器发送消息
 	sendResult := ms.adapter.Send(convRef, content, taskID)
 
@@ -460,7 +500,9 @@ func (ms *MonitorService) updateSessionAfterReply(contactID, content, taskID str
 		errorMsg = sendResult.Error
 	}
 
-	_, err := ms.sessionMgr.AddReply(contactID, content, taskID, success, errorMsg, confidence)
+	// 使用taskID作为回复指纹（每个回复任务唯一）
+	replyFingerprint := taskID
+	_, err := ms.sessionMgr.AddReply(contactID, content, taskID, success, errorMsg, confidence, replyFingerprint)
 	if err != nil {
 		return fmt.Errorf("添加回复记录失败: %v", err)
 	}
